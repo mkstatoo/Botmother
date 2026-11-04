@@ -1,0 +1,23 @@
+services:
+  botfactory:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"   # پشت یک reverse proxy (nginx/caddy) با HTTPS قرار دهید
+    volumes:
+      - ./data:/app/data
+
+  # اختیاری: PostgreSQL به‌جای SQLite
+  # در .env بنویسید: DATABASE_URL=postgresql+asyncpg://bf:bf@db/botfactory
+  # db:
+  #   image: postgres:16
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: bf
+  #     POSTGRES_PASSWORD: bf
+  #     POSTGRES_DB: botfactory
+  #   volumes:
+  #     - pgdata:/var/lib/postgresql/data
+# volumes:
+#   pgdata:

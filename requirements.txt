@@ -1,0 +1,12 @@
+aiogram>=3.13,<4
+SQLAlchemy[asyncio]>=2.0,<2.2
+aiosqlite>=0.20
+aiohttp>=3.9
+aiohttp-socks>=0.9   # لازم برای پروکسی (PROXY_URL)
+cryptography>=42
+pydantic-settings>=2.2
+jdatetime>=5
+
+# اختیاری:
+# asyncpg>=0.29      # برای PostgreSQL
+# redis>=5           # برای ذخیره‌ی حالت‌های گفتگو (FSM) روی Redis
