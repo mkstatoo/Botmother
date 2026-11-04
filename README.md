@@ -35,6 +35,8 @@ python -m botfactory
 
 با Docker: `cp .env.example .env && docker compose up -d --build`
 
+**استقرار کامل روی سرور (HTTPS خودکار، پشتیبان‌گیری، به‌روزرسانی): [DEPLOY.md](DEPLOY.md)**
+
 ### تنظیمات مهم (`.env`)
 
 | متغیر | توضیح |
