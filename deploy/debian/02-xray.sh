@@ -22,18 +22,22 @@ fi
 "$BIN" version | head -1
 
 echo
-echo "لینک پروکسی (vless:// یا vmess:// یا trojan:// یا ss://) را بچسبانید و Enter بزنید."
+echo "لینک پروکسی را بچسبانید و Enter بزنید. این‌ها قبول است:"
+echo "  • لینک اشتراک (https://…/sub/…)   • vless:// vmess:// trojan:// ss://"
 echo "(هنگام چسباندن چیزی نمایش داده نمی‌شود؛ این طبیعی است)"
 read -rs LINK; echo
 mkdir -p "$CFG_DIR"
-if ! printf '%s' "$LINK" | PYTHONPATH="$APP_DIR" python3 -m botfactory.xray_link > "$CFG_DIR/config.json.new"; then
-  rm -f "$CFG_DIR/config.json.new"; echo "تبدیل لینک ناموفق بود." >&2; exit 1
-fi
-unset LINK
-"$BIN" run -test -c "$CFG_DIR/config.json.new" >/dev/null
-mv "$CFG_DIR/config.json.new" "$CFG_DIR/config.json"
-chown root:nogroup "$CFG_DIR/config.json"; chmod 640 "$CFG_DIR/config.json"
+conv() { printf '%s' "$LINK" | PYTHONPATH="$APP_DIR" python3 -m botfactory.xray_link "$@"; }
 
+COUNT=1
+if [[ "$LINK" =~ ^https?:// ]]; then
+  echo "▶ دریافت فهرست سرورها از لینک اشتراک…"
+  LIST="$(conv --list)" || { echo "$LIST" >&2; exit 1; }
+  echo "$LIST"
+  COUNT="$(printf '%s\n' "$LIST" | grep -c .)"
+fi
+
+install_unit() {
 cat > /etc/systemd/system/xray.service <<'UNIT'
 [Unit]
 Description=Xray client (local proxy for Telegram)
@@ -56,16 +60,48 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 systemctl enable xray >/dev/null 2>&1
-systemctl restart xray
-sleep 3
+}
 
-echo "▶ آزمایش اتصال به تلگرام از طریق پروکسی…"
-CODE="$(curl -s -o /dev/null -m 15 -w '%{http_code}' --socks5-hostname 127.0.0.1:1080 https://api.telegram.org/ || true)"
-if [ "$CODE" != "000" ] && [ -n "$CODE" ]; then
-  echo "✔ تلگرام از طریق پروکسی در دسترس است (کد $CODE)."
-  [ -f "$ENV_FILE" ] && set_env PROXY_URL "socks5://127.0.0.1:1080" && echo "  PROXY_URL در .env تنظیم شد."
+try_pick() {  # try_pick N → 0 اگر تلگرام از طریق این سرور در دسترس بود
+  local n="$1"
+  conv --pick "$n" > "$CFG_DIR/config.json.new" || { rm -f "$CFG_DIR/config.json.new"; return 2; }
+  "$BIN" run -test -c "$CFG_DIR/config.json.new" >/dev/null || { rm -f "$CFG_DIR/config.json.new"; return 2; }
+  mv "$CFG_DIR/config.json.new" "$CFG_DIR/config.json"
+  chown root:nogroup "$CFG_DIR/config.json"; chmod 640 "$CFG_DIR/config.json"
+  install_unit
+  systemctl restart xray
+  sleep 3
+  local code
+  code="$(curl -s -o /dev/null -m 15 -w '%{http_code}' --socks5-hostname 127.0.0.1:1080 https://api.telegram.org/ || true)"
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+N=1
+if [ "$COUNT" -gt 1 ]; then
+  read -rp "شماره‌ی سروری که امتحان شود (پیش‌فرض 1، یا a برای امتحان خودکار همه): " ANS
+  ANS="${ANS:-1}"
 else
-  echo "✘ از طریق پروکسی به تلگرام نرسیدیم. لاگ: journalctl -u xray -n 30 --no-pager" >&2
-  echo "  احتمال‌ها: لینک منقضی/غلط است، یا دیتاسنتر این پروتکل را قطع کرده است." >&2
-  exit 1
+  ANS=1
 fi
+
+OK=0
+if [ "$ANS" = "a" ] || [ "$ANS" = "A" ]; then
+  for ((N=1; N<=COUNT; N++)); do
+    echo "▶ سرور $N از $COUNT …"
+    if try_pick "$N"; then OK=1; break; fi
+  done
+else
+  [[ "$ANS" =~ ^[0-9]+$ ]] || { echo "شماره معتبر نیست." >&2; exit 1; }
+  N="$ANS"
+  try_pick "$N" && OK=1 || true
+fi
+unset LINK
+
+if [ "$OK" = 1 ]; then
+  echo "✔ تلگرام از طریق پروکسی در دسترس است (سرور شماره‌ی $N)."
+  [ -f "$ENV_FILE" ] && set_env PROXY_URL "socks5://127.0.0.1:1080" && echo "  PROXY_URL در .env تنظیم شد."
+  exit 0
+fi
+echo "✘ از طریق پروکسی به تلگرام نرسیدیم. لاگ: journalctl -u xray -n 30 --no-pager" >&2
+echo "  احتمال‌ها: آن سرور خراب/منقضی است، یا دیتاسنتر این پروتکل را قطع کرده است. اسکریپت را دوباره اجرا و سرور دیگری انتخاب کنید." >&2
+exit 1

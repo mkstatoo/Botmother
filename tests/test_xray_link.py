@@ -95,3 +95,77 @@ def test_config_shape_listens_only_locally():
 def test_bad_links_are_rejected(bad):
     with pytest.raises(LinkError):
         build_config(bad)
+
+
+# ----------------------------------------------------------------------------- subscriptions
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from botfactory import xray_link as xl
+
+L1 = f"vless://{UUID}@a.example.org:443?security=tls&type=ws&path=%2Fw&sni=a.example.org#%F0%9F%87%A9%F0%9F%87%AA%20DE"
+L2 = "trojan://pw@b.example.org:443?sni=b.example.org#NL"
+L3 = "hysteria2://x@c.example.org:443#unsupported-skipped"
+
+
+@pytest.fixture
+def sub_server():
+    body_b64 = base64.b64encode("\n".join([L1, L2, L3]).encode())
+    seen = {}
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            seen["ua"] = self.headers.get("User-Agent")
+            data = body_b64 if self.path.startswith("/sub/") else b"<html>not found</html>"
+            self.send_response(200 if self.path.startswith("/sub/") else 404)
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_port}", seen
+    srv.shutdown()
+
+
+def test_subscription_detection():
+    assert xl.is_subscription_url("https://host.example/sub/abcd")
+    assert xl.is_subscription_url("http://host.example/sub/abcd")
+    assert not xl.is_subscription_url("http://host.example:3128")
+    assert not xl.is_subscription_url("vless://x@h:1")
+
+
+def test_parse_subscription_base64_and_plain():
+    assert xl.parse_subscription(base64.b64encode("\n".join([L1, L2, L3]).encode()).decode()) == [L1, L2]
+    assert xl.parse_subscription("\n".join([L1, L2])) == [L1, L2]
+    with pytest.raises(LinkError):
+        xl.parse_subscription("proxies:\n  - name: clash")
+
+
+def test_subscription_cli_list_and_pick(sub_server, monkeypatch, capsys):
+    base, seen = sub_server
+    url = f"{base}/sub/TOKEN123"
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(url))
+    assert xl.main(["--list"]) == 0
+    listing = capsys.readouterr().out
+    assert "a.example.org:443" in listing and "b.example.org:443" in listing and "c.example.org" not in listing
+    assert "TOKEN123" not in listing and UUID not in listing and "pw" not in listing.replace("example", "")
+    assert seen["ua"].startswith("v2rayN")
+
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(url))
+    assert xl.main(["--pick", "2"]) == 0
+    cfg = json.loads(capsys.readouterr().out)
+    assert cfg["outbounds"][0]["protocol"] == "trojan"
+
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(url))
+    assert xl.main(["--pick", "9"]) == 1
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(f"{base}/nope/x"))
+    assert xl.main(["--list"]) == 1
+
+
+def test_unreachable_subscription_is_a_clean_error(monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO("https://127.0.0.1:9/sub/x"))
+    assert xl.main(["--list"]) == 1
+    assert "خطا" in capsys.readouterr().err

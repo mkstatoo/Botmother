@@ -5,6 +5,7 @@ Usage on the server (the link is read from stdin so it never lands in shell hist
     read -rs LINK && printf '%s' "$LINK" | python -m botfactory.xray_link > /usr/local/etc/xray/config.json
 
 Supported: vless://, vmess://, trojan://, ss://, socks5://, http://
+and subscription URLs (https://host/sub/...): the list of nodes is fetched and one is chosen with --pick N.
 The bot then uses ``PROXY_URL=socks5://127.0.0.1:1080`` (or ``http://127.0.0.1:8118``).
 """
 
@@ -14,6 +15,8 @@ import base64
 import binascii
 import json
 import sys
+import urllib.error
+import urllib.request
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -292,13 +295,88 @@ def build_config(link: str) -> dict[str, Any]:
     }
 
 
-def main() -> int:
-    link = sys.stdin.read().strip()
-    if not link:
+SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://")
+
+
+def is_subscription_url(text: str) -> bool:
+    """https://host/path…  → subscription.  A bare http://host:port stays a plain HTTP proxy."""
+    u = urlsplit(text.strip())
+    return u.scheme in {"http", "https"} and bool(u.hostname) and (u.path not in {"", "/"} or u.scheme == "https")
+
+
+def fetch_subscription(url: str, timeout: int = 25) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": "v2rayN/6.45", "Accept": "*/*"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - admin-supplied URL
+            return resp.read(2_000_000).decode("utf-8", "replace")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise LinkError(f"دریافت لیست اشتراک ناموفق بود: {exc}") from exc
+
+
+def parse_subscription(text: str) -> list[str]:
+    """Subscription body = base64 of newline-separated links, or the links in plain text."""
+    body = text.strip()
+    if not any(scheme in body for scheme in SUPPORTED_SCHEMES):
+        try:
+            body = _b64decode(body.replace("\n", "").replace("\r", "")).decode("utf-8", "replace")
+        except LinkError:
+            body = ""
+    links = [ln.strip() for ln in body.replace("\r", "").split("\n") if ln.strip().startswith(SUPPORTED_SCHEMES)]
+    if not links:
+        raise LinkError("در لیست اشتراک لینک قابل‌استفاده (vless/vmess/trojan/ss) پیدا نشد. فرمت Clash/sing-box پشتیبانی نمی‌شود.")
+    return links
+
+
+def describe(link: str) -> str:
+    """Short human label without secrets: protocol, remark, host:port."""
+    scheme = link.split("://", 1)[0]
+    name = unquote(link.split("#", 1)[1]) if "#" in link else ""
+    try:
+        out = parse_link(link)
+        if scheme == "ss":
+            srv = out["settings"]["servers"][0]
+        elif scheme in {"vless", "vmess"}:
+            srv = out["settings"]["vnext"][0]
+        else:
+            srv = out["settings"]["servers"][0]
+        where = f"{srv['address']}:{srv['port']}"
+        net = out.get("streamSettings", {})
+        extra = "/".join(x for x in (net.get("network"), net.get("security")) if x and x != "none")
+    except LinkError:
+        return f"{scheme}  {name}  (ناقص)"
+    return f"{scheme}  {name}  {where}  {extra}".rstrip()
+
+
+def resolve_links(text: str) -> list[str]:
+    text = text.strip()
+    if is_subscription_url(text):
+        return parse_subscription(fetch_subscription(text))
+    return [text]
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    list_only = "--list" in args
+    pick = 1
+    if "--pick" in args:
+        try:
+            pick = int(args[args.index("--pick") + 1])
+        except (IndexError, ValueError):
+            print("خطا: شماره‌ی --pick معتبر نیست.", file=sys.stderr)
+            return 2
+    raw = sys.stdin.read().strip()
+    if not raw:
         print("خطا: لینک از ورودی خوانده نشد.", file=sys.stderr)
         return 2
     try:
-        config = build_config(link)
+        links = resolve_links(raw)
+        if list_only:
+            for i, link in enumerate(links, 1):
+                print(f"{i}\t{describe(link)}")
+            return 0
+        if not 1 <= pick <= len(links):
+            raise LinkError(f"شماره باید بین ۱ و {len(links)} باشد.")
+        config = build_config(links[pick - 1])
     except LinkError as exc:
         print(f"خطا: {exc}", file=sys.stderr)
         return 1
