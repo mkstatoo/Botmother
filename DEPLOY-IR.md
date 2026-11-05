@@ -17,13 +17,12 @@
 - دامنه فقط برای **درگاه‌های بانکی/ارز دیجیتال** لازم است. بدون دامنه، ربات و پرداخت «کارت‌به‌کارت» کامل کار می‌کند.
 
 ## گام ۰ — دریافت کد
-مخزن private است؛ یک توکن فقط‌خواندنی بسازید: GitHub ← Settings ← Developer settings ← Fine-grained tokens ← فقط مخزن `Botmother` ← Permissions: **Contents: Read-only**.
+مخزن عمومی است و توکن لازم نیست (چیزی محرمانه داخل کد نیست؛ توکن‌ها فقط در `.env` روی سرور می‌مانند).
 ```bash
-apt-get update && apt-get install -y git
-read -rs GH_TOKEN; echo          # توکن را بچسبانید و Enter (نمایش داده نمی‌شود)
-git clone https://x-access-token:${GH_TOKEN}@github.com/mkstatoo/Botmother.git /opt/botmother
-git -C /opt/botmother remote set-url origin https://github.com/mkstatoo/Botmother.git
-unset GH_TOKEN
+apt-get update && apt-get install -y git tmux
+tmux new -s bf
+git clone https://github.com/mkstatoo/Botmother.git /opt/botmother
+ls /opt/botmother/deploy/debian
 ```
 
 ## گام ۱ — پایه
@@ -60,8 +59,7 @@ bash /opt/botmother/deploy/debian/04-https.sh bots.example.ir you@example.com
 ## به‌روزرسانی
 ```bash
 cd /opt/botmother && ./scripts/backup.sh /var/backups/botmother
-read -rs GH_TOKEN; echo
-git pull https://x-access-token:${GH_TOKEN}@github.com/mkstatoo/Botmother.git main; unset GH_TOKEN
+git pull origin main
 venv/bin/pip install -q -r requirements.txt && systemctl restart botmother
 ```
 
