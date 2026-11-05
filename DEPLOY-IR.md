@@ -1,0 +1,83 @@
+# 🇮🇷 استقرار روی سرور مجازی ایران (Debian 12 + بدون Docker)
+
+این راهنما برای سروری است که **تلگرام و Docker Hub روی آن بسته‌اند** ولی `apt`، GitHub، PyPI، زرین‌پال و Let's Encrypt باز هستند (دقیقاً وضعیت سرور تست‌شده). به‌جای Docker، برنامه با پایتون ۳٫۱۱ و systemd اجرا می‌شود و ترافیک تلگرام از یک پروکسی محلی (Xray) عبور می‌کند.
+
+```
+ربات (polling) ──► 127.0.0.1:1080 (Xray) ══► پروکسی/سرور V2Ray شما ──► تلگرام
+زرین‌پال / درگاه  ◄── nginx (HTTPS، فقط وقتی دامنه دارید) ◄── اینترنت
+```
+
+> 💡 همه‌ی دستورها را داخل `tmux` بزنید تا اگر اتصال گوشی قطع شد کار نیمه‌کاره نماند:
+> `tmux new -s bf` ← برگشت بعد از قطع شدن: `tmux attach -t bf`
+
+## پیش‌نیازها
+- ورود با SSH به‌عنوان root، و **رمز root عوض شده** باشد (`passwd`).
+- توکن ربات مادر از @BotFather و آیدی عددی شما.
+- یک **لینک پروکسی** که از ایران به تلگرام برسد: `vless://` `vmess://` `trojan://` `ss://` (یا SOCKS5/HTTP ساده).
+- دامنه فقط برای **درگاه‌های بانکی/ارز دیجیتال** لازم است. بدون دامنه، ربات و پرداخت «کارت‌به‌کارت» کامل کار می‌کند.
+
+## گام ۰ — دریافت کد
+مخزن private است؛ یک توکن فقط‌خواندنی بسازید: GitHub ← Settings ← Developer settings ← Fine-grained tokens ← فقط مخزن `Botmother` ← Permissions: **Contents: Read-only**.
+```bash
+apt-get update && apt-get install -y git
+read -rs GH_TOKEN; echo          # توکن را بچسبانید و Enter (نمایش داده نمی‌شود)
+git clone https://x-access-token:${GH_TOKEN}@github.com/mkstatoo/Botmother.git /opt/botmother
+git -C /opt/botmother remote set-url origin https://github.com/mkstatoo/Botmother.git
+unset GH_TOKEN
+```
+
+## گام ۱ — پایه
+```bash
+bash /opt/botmother/deploy/debian/01-base.sh
+```
+پکیج‌ها، پایتون، کاربر سرویس و swap دو گیگی را آماده می‌کند.
+
+## گام ۲ — پروکسی تلگرام (Xray)
+```bash
+bash /opt/botmother/deploy/debian/02-xray.sh
+```
+لینک پروکسی را می‌پرسد (هنگام چسباندن چیزی نمایش داده نمی‌شود)، تنظیمات را می‌سازد، سرویس را بالا می‌آورد و **اتصال به تلگرام را آزمایش می‌کند**. باید ببینید: `✔ تلگرام از طریق پروکسی در دسترس است`.
+- اگر پروکسی SOCKS5/HTTP ساده دارید این گام را رد کنید و بعداً در `/opt/botmother/.env` بنویسید: `PROXY_URL=socks5://user:pass@host:port`
+- اگر آزمایش ناموفق بود: `journalctl -u xray -n 30 --no-pager` — معمولاً لینک منقضی است یا دیتاسنتر آن پروتکل را قطع کرده؛ لینک دیگری (مثلاً با CDN/ws یا reality) امتحان کنید.
+
+## گام ۳ — برنامه
+```bash
+bash /opt/botmother/deploy/debian/03-app.sh
+```
+توکن ربات مادر و آیدی عددی شما را می‌پرسد، برنامه را نصب و سرویس `botmother` را فعال می‌کند. در لاگ باید `mother bot: @…` ببینید:
+```bash
+journalctl -u botmother -f        # خروج: Ctrl+C
+```
+بعد ربات مادر را در تلگرام `/start` کنید و «ساخت ربات جدید» را بزنید. پشتیبان شبانه هم خودکار فعال می‌شود (`/var/backups/botmother`).
+
+## گام ۴ — دامنه و HTTPS (وقتی دامنه گرفتید)
+۱) رکورد **A** دامنه (مثلاً `bots.example.ir`) را به IP سرور بزنید. ۲) پورت‌های ۸۰ و ۴۴۳ باز باشند. ۳)
+```bash
+bash /opt/botmother/deploy/debian/04-https.sh bots.example.ir you@example.com
+```
+گواهی می‌گیرد، `BASE_URL` را تنظیم و آزمایش `healthz` را چاپ می‌کند (باید `200` باشد). از این‌به‌بعد زرین‌پال و NOWPayments داخل پنل هر ربات فعال می‌شود. حالت ربات همچنان polling می‌ماند (نیازی به قابل‌دسترس بودن سرور از سمت تلگرام نیست).
+
+## به‌روزرسانی
+```bash
+cd /opt/botmother && ./scripts/backup.sh /var/backups/botmother
+read -rs GH_TOKEN; echo
+git pull https://x-access-token:${GH_TOKEN}@github.com/mkstatoo/Botmother.git main; unset GH_TOKEN
+venv/bin/pip install -q -r requirements.txt && systemctl restart botmother
+```
+
+## دستورهای روزمره
+| کار | دستور |
+|---|---|
+| وضعیت | `systemctl status botmother xray` |
+| لاگ زنده | `journalctl -u botmother -f` |
+| ری‌استارت | `systemctl restart botmother` |
+| تغییر تنظیمات | `nano /opt/botmother/.env` سپس ری‌استارت |
+| پشتیبان دستی | `cd /opt/botmother && DATA_DIR=data ./scripts/backup.sh /var/backups/botmother` |
+
+⚠️ فایل پشتیبان شامل `fernet.key` است؛ یک نسخه را **خارج از سرور** نگه دارید (دانلود با `scp`).
+
+## نکته‌ها و محدودیت‌ها
+- **Xray** از GitHub دانلود می‌شود. اگر دانلود فایل‌های release روی سرور بسته بود، اسکریپت پیام می‌دهد؛ فایل `Xray-linux-64.zip` را جای دیگری بگیرید و در `/root` بگذارید و دوباره اجرا کنید.
+- پروکسی فقط برای **تلگرام** استفاده می‌شود. تماس با زرین‌پال مستقیم از سرور ایران انجام می‌شود. NOWPayments (ارز دیجیتال) هم مستقیم تماس می‌گیرد و اگر از ایران بسته بود، در لاگ خطا می‌بینید؛ در آن حالت فعلاً از واریز دستی یا زرین‌پال استفاده کنید.
+- با polling و یک پروکسی، برای ده‌ها ربات کافی است؛ برای صدها ربات بهتر است سرور خارج از ایران یا webhook استفاده شود.
+- پایتون ۳٫۱۱ (نسخه‌ی Debian 12) با ۴۶ تست اصلی و ۱۷ تست تبدیل لینک آزموده شده؛ اسکریپت‌های نصب خودشان روی یک Debian واقعی اجرا نشده‌اند (محیط ساخت systemd ندارد)، پس اولین اجرا را با دقت دنبال کنید و خروجی خطا را بفرستید.

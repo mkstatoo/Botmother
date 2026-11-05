@@ -37,6 +37,8 @@ python -m botfactory
 
 **استقرار کامل روی سرور (HTTPS خودکار، پشتیبان‌گیری، به‌روزرسانی): [DEPLOY.md](DEPLOY.md)**
 
+**سرور ایران (تلگرام و Docker Hub بسته، Debian 12 بدون Docker، پروکسی V2Ray): [DEPLOY-IR.md](DEPLOY-IR.md)**
+
 ### تنظیمات مهم (`.env`)
 
 | متغیر | توضیح |
