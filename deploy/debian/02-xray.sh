@@ -8,15 +8,20 @@ CFG_DIR=/usr/local/etc/xray
 BIN=/usr/local/bin/xray
 
 if [ ! -x "$BIN" ]; then
-  echo "▶ دریافت Xray از GitHub…"
+  ZIP=/root/Xray-linux-64.zip
+  URL=https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
   TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-  if ! curl -fsSL --retry 3 -m 120 -o "$TMP/x.zip" https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip; then
-    echo "دریافت Xray ناموفق بود (ممکن است دانلود فایل از GitHub روی این سرور بسته باشد)." >&2
-    echo "فایل Xray-linux-64.zip را از جای دیگر بگیرید و در /root قرار دهید، سپس دوباره اجرا کنید." >&2
-    [ -f /root/Xray-linux-64.zip ] || exit 1
-    cp /root/Xray-linux-64.zip "$TMP/x.zip"
+  # دانلود قابل‌ازسرگیری: اگر اینترنت کند باشد یا قطع شود، از همان‌جا ادامه می‌دهد
+  for attempt in 1 2 3 4 5 6 7 8; do
+    if unzip -tq "$ZIP" >/dev/null 2>&1; then break; fi
+    echo "▶ دریافت Xray از GitHub (تلاش $attempt از ۸)…"
+    curl -fL -C - --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20 -m 300 -o "$ZIP" "$URL" || true
+  done
+  if ! unzip -tq "$ZIP" >/dev/null 2>&1; then
+    echo "دریافت Xray کامل نشد. فایل $ZIP را از جای دیگری بگیرید و دوباره اجرا کنید." >&2
+    exit 1
   fi
-  unzip -qo "$TMP/x.zip" xray -d "$TMP"
+  unzip -qo "$ZIP" xray -d "$TMP"
   install -m 755 "$TMP/xray" "$BIN"
 fi
 "$BIN" version | head -1
