@@ -24,7 +24,7 @@ if [ ! -x "$BIN" ]; then
   unzip -qo "$ZIP" xray -d "$TMP"
   install -m 755 "$TMP/xray" "$BIN"
 fi
-"$BIN" version | head -1
+"$BIN" version 2>&1 | head -1 || true
 
 echo
 echo "لینک پروکسی را بچسبانید و Enter بزنید. این‌ها قبول است:"
@@ -32,15 +32,17 @@ echo "  • لینک اشتراک (https://…/sub/…)   • vless:// vmess:// 
 echo "(هنگام چسباندن چیزی نمایش داده نمی‌شود؛ این طبیعی است)"
 read -rs LINK; echo
 mkdir -p "$CFG_DIR"
-conv() { printf '%s' "$LINK" | PYTHONPATH="$APP_DIR" python3 -m botfactory.xray_link "$@"; }
 
-COUNT=1
-if [[ "$LINK" =~ ^https?:// ]]; then
-  echo "▶ دریافت فهرست سرورها از لینک اشتراک…"
-  LIST="$(conv --list)" || { echo "$LIST" >&2; exit 1; }
-  echo "$LIST"
-  COUNT="$(printf '%s\n' "$LIST" | grep -c .)"
-fi
+# لینک‌ها یک‌بار گرفته و در فایل موقت (دسترسی ۶۰۰) ذخیره می‌شوند؛ سایت اشتراک ممکن است درخواست تکراری را رد کند
+LF="$(mktemp)"; chmod 600 "$LF"; rm -f "$LF"
+cleanup() { rm -f "$LF"; rm -rf "${TMP:-}"; }
+trap cleanup EXIT
+xl() { PYTHONPATH="$APP_DIR" python3 -m botfactory.xray_link --links-file "$LF" --xray "$BIN" "$@"; }
+
+echo "▶ دریافت و بررسی لینک…"
+printf '%s' "$LINK" | xl --list > /tmp/xray-list.$$ || { echo "تبدیل/دریافت لینک ناموفق بود." >&2; exit 1; }
+unset LINK
+cat /tmp/xray-list.$$; COUNT="$(grep -c . /tmp/xray-list.$$)"; rm -f /tmp/xray-list.$$
 
 install_unit() {
 cat > /etc/systemd/system/xray.service <<'UNIT'
@@ -67,40 +69,44 @@ systemctl daemon-reload
 systemctl enable xray >/dev/null 2>&1
 }
 
-try_pick() {  # try_pick N → 0 اگر تلگرام از طریق این سرور در دسترس بود
-  local n="$1"
-  conv --pick "$n" > "$CFG_DIR/config.json.new" || { rm -f "$CFG_DIR/config.json.new"; return 2; }
+try_pick() {  # try_pick N → 0 اگر تلگرام از طریق این سرور واقعاً در دسترس بود
+  local n="$1" code
+  xl --pick "$n" > "$CFG_DIR/config.json.new" </dev/null || { rm -f "$CFG_DIR/config.json.new"; return 2; }
   "$BIN" run -test -c "$CFG_DIR/config.json.new" >/dev/null || { rm -f "$CFG_DIR/config.json.new"; return 2; }
   mv "$CFG_DIR/config.json.new" "$CFG_DIR/config.json"
   chown root:nogroup "$CFG_DIR/config.json"; chmod 640 "$CFG_DIR/config.json"
   install_unit
   systemctl restart xray
   sleep 3
-  local code
-  code="$(curl -s -o /dev/null -m 15 -w '%{http_code}' --socks5-hostname 127.0.0.1:1080 https://api.telegram.org/ || true)"
+  code="$(curl -s -o /dev/null -m 15 --noproxy '' -w '%{http_code}' --socks5-hostname 127.0.0.1:1080 https://api.telegram.org/ || true)"
   [ -n "$code" ] && [ "$code" != "000" ]
 }
 
-N=1
+ANS=a
 if [ "$COUNT" -gt 1 ]; then
-  read -rp "شماره‌ی سروری که امتحان شود (پیش‌فرض 1، یا a برای امتحان خودکار همه): " ANS
-  ANS="${ANS:-1}"
-else
-  ANS=1
+  read -rp "Enter = انتخاب خودکار سریع‌ترین سرور (پیشنهادی)  |  یا شماره‌ی یک سرور: " ANS
+  ANS="${ANS:-a}"
 fi
 
-OK=0
+OK=0; N=1
 if [ "$ANS" = "a" ] || [ "$ANS" = "A" ]; then
-  for ((N=1; N<=COUNT; N++)); do
-    echo "▶ سرور $N از $COUNT …"
-    if try_pick "$N"; then OK=1; break; fi
-  done
+  echo "▶ آزمایش تأخیر همه‌ی سرورها تا تلگرام (حدود ۱ تا ۳ دقیقه)…"
+  RANK="$(xl --bench --test-url "${XRAY_TEST_URL:-https://api.telegram.org/}" </dev/null || true)"
+  if [ -z "$RANK" ]; then
+    echo "هیچ‌کدام از سرورها از این شبکه به تلگرام نرسیدند." >&2
+  else
+    echo "سریع‌ترین‌ها (شماره | میلی‌ثانیه | مشخصات):"
+    printf '%s\n' "$RANK" | head -5
+    while IFS=$'\t' read -r N MS _; do
+      echo "▶ امتحان نهایی سرور $N (${MS}ms)…"
+      if try_pick "$N"; then OK=1; break; fi
+    done <<< "$RANK"
+  fi
 else
   [[ "$ANS" =~ ^[0-9]+$ ]] || { echo "شماره معتبر نیست." >&2; exit 1; }
   N="$ANS"
   try_pick "$N" && OK=1 || true
 fi
-unset LINK
 
 if [ "$OK" = 1 ]; then
   echo "✔ تلگرام از طریق پروکسی در دسترس است (سرور شماره‌ی $N)."
@@ -108,5 +114,5 @@ if [ "$OK" = 1 ]; then
   exit 0
 fi
 echo "✘ از طریق پروکسی به تلگرام نرسیدیم. لاگ: journalctl -u xray -n 30 --no-pager" >&2
-echo "  احتمال‌ها: آن سرور خراب/منقضی است، یا دیتاسنتر این پروتکل را قطع کرده است. اسکریپت را دوباره اجرا و سرور دیگری انتخاب کنید." >&2
+echo "  احتمال‌ها: سرورها خراب/منقضی‌اند یا دیتاسنتر این پروتکل‌ها را قطع کرده است." >&2
 exit 1

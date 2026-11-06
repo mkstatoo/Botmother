@@ -11,12 +11,19 @@ The bot then uses ``PROXY_URL=socks5://127.0.0.1:1080`` (or ``http://127.0.0.1:8
 
 from __future__ import annotations
 
+import argparse
 import base64
 import binascii
 import json
+import os
+import socket
+import subprocess
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -275,23 +282,27 @@ def parse_link(link: str) -> dict[str, Any]:
         raise LinkError("لینک ناقص یا نامعتبر است (آدرس، پورت یا پارامترها را بررسی کنید).") from exc
 
 
-def build_config(link: str) -> dict[str, Any]:
+def build_config(link: str, socks_port: int = SOCKS_PORT, http_port: int | None = HTTP_PORT) -> dict[str, Any]:
     outbound = parse_link(link)
     outbound["tag"] = "proxy"
+    inbounds: list[dict[str, Any]] = [
+        {
+            "tag": "socks-in",
+            "listen": "127.0.0.1",
+            "port": socks_port,
+            "protocol": "socks",
+            "settings": {"udp": False, "auth": "noauth"},
+        }
+    ]
+    tags = ["socks-in"]
+    if http_port is not None:
+        inbounds.append({"tag": "http-in", "listen": "127.0.0.1", "port": http_port, "protocol": "http", "settings": {}})
+        tags.append("http-in")
     return {
         "log": {"loglevel": "warning"},
-        "inbounds": [
-            {
-                "tag": "socks-in",
-                "listen": "127.0.0.1",
-                "port": SOCKS_PORT,
-                "protocol": "socks",
-                "settings": {"udp": False, "auth": "noauth"},
-            },
-            {"tag": "http-in", "listen": "127.0.0.1", "port": HTTP_PORT, "protocol": "http", "settings": {}},
-        ],
+        "inbounds": inbounds,
         "outbounds": [outbound, {"tag": "direct", "protocol": "freedom"}],
-        "routing": {"domainStrategy": "AsIs", "rules": [{"type": "field", "inboundTag": ["socks-in", "http-in"], "outboundTag": "proxy"}]},
+        "routing": {"domainStrategy": "AsIs", "rules": [{"type": "field", "inboundTag": tags, "outboundTag": "proxy"}]},
     }
 
 
@@ -304,13 +315,21 @@ def is_subscription_url(text: str) -> bool:
     return u.scheme in {"http", "https"} and bool(u.hostname) and (u.path not in {"", "/"} or u.scheme == "https")
 
 
-def fetch_subscription(url: str, timeout: int = 25) -> str:
+def fetch_subscription(url: str, timeout: int = 25, attempts: int = 4) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": "v2rayN/6.45", "Accept": "*/*"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - admin-supplied URL
-            return resp.read(2_000_000).decode("utf-8", "replace")
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise LinkError(f"دریافت لیست اشتراک ناموفق بود: {exc}") from exc
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - admin-supplied URL
+                return resp.read(2_000_000).decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            last = exc
+            if exc.code < 500 and exc.code != 429:
+                break  # 4xx = wrong/expired link, retrying will not help
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last = exc
+        time.sleep(min(2 * (attempt + 1), 6))
+    raise LinkError(f"دریافت لیست اشتراک ناموفق بود: {last}")
 
 
 def parse_subscription(text: str) -> list[str]:
@@ -354,29 +373,115 @@ def resolve_links(text: str) -> list[str]:
     return [text]
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    list_only = "--list" in args
-    pick = 1
-    if "--pick" in args:
+def _wait_port(port: int, seconds: float) -> bool:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        with socket.socket() as sock:
+            sock.settimeout(0.3)
+            if sock.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        time.sleep(0.15)
+    return False
+
+
+def measure_link(
+    link: str, xray_bin: str, port: int, url: str, timeout: int = 10, tries: int = 2
+) -> float | None:
+    """Start a throw-away Xray for ``link`` and return the best total request time in ms (None = unusable)."""
+    try:
+        config = build_config(link, socks_port=port, http_port=None)
+    except LinkError:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "c.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(config, fh)
+        proc = subprocess.Popen([xray_bin, "run", "-c", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # noqa: S603
         try:
-            pick = int(args[args.index("--pick") + 1])
-        except (IndexError, ValueError):
-            print("خطا: شماره‌ی --pick معتبر نیست.", file=sys.stderr)
-            return 2
+            if not _wait_port(port, 6):
+                return None
+            best: float | None = None
+            for _ in range(tries):
+                r = subprocess.run(  # noqa: S603
+                    ["curl", "-s", "-o", "/dev/null", "-m", str(timeout), "--noproxy", "", "--socks5-hostname", f"127.0.0.1:{port}", "-w", "%{http_code} %{time_total}", url],  # noqa: S607
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                code, _, secs = r.stdout.strip().partition(" ")
+                if r.returncode == 0 and code and code != "000":
+                    try:
+                        ms = float(secs) * 1000
+                    except ValueError:
+                        continue
+                    best = ms if best is None else min(best, ms)
+            return best
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+
+def benchmark(
+    links: list[str], xray_bin: str, url: str, workers: int = 8, base_port: int = 21000, timeout: int = 10
+) -> list[tuple[int, float]]:
+    """Return [(1-based index, ms)] for the working links, fastest first."""
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futures = [pool.submit(measure_link, link, xray_bin, base_port + i, url, timeout) for i, link in enumerate(links)]
+        results = [(i + 1, f.result()) for i, f in enumerate(futures)]
+    return sorted(((i, ms) for i, ms in results if ms is not None), key=lambda t: t[1])
+
+
+def _load_links(args: argparse.Namespace) -> list[str]:
+    """Links come from the cache file when it exists; otherwise from stdin (and are cached)."""
+    cache = args.links_file
+    if cache and os.path.exists(cache):
+        with open(cache, encoding="utf-8") as fh:
+            links = [ln.strip() for ln in fh if ln.strip()]
+        if links:
+            return links
     raw = sys.stdin.read().strip()
     if not raw:
-        print("خطا: لینک از ورودی خوانده نشد.", file=sys.stderr)
-        return 2
+        raise LinkError("لینک از ورودی خوانده نشد.")
+    links = resolve_links(raw)
+    if cache:
+        fd = os.open(cache, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(links) + "\n")
+    return links
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="botfactory.xray_link", add_help=True)
+    ap.add_argument("--list", action="store_true", help="فهرست سرورها (بدون اطلاعات محرمانه)")
+    ap.add_argument("--pick", type=int, default=1, help="ساخت تنظیمات برای سرور شماره N")
+    ap.add_argument("--links-file", help="فایل کش لینک‌ها (دسترسی ۶۰۰)؛ اگر نبود از stdin ساخته می‌شود")
+    ap.add_argument("--bench", action="store_true", help="همه‌ی سرورها را امتحان و بر اساس تأخیر مرتب کن")
+    ap.add_argument("--xray", default="/usr/local/bin/xray")
+    ap.add_argument("--test-url", default="https://api.telegram.org/")
+    ap.add_argument("--workers", type=int, default=8)
     try:
-        links = resolve_links(raw)
-        if list_only:
+        args = ap.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code or 2)
+    try:
+        links = _load_links(args)
+        if args.list:
             for i, link in enumerate(links, 1):
                 print(f"{i}\t{describe(link)}")
             return 0
-        if not 1 <= pick <= len(links):
+        if args.bench:
+            ranked = benchmark(links, args.xray, args.test_url, workers=args.workers)
+            for i, ms in ranked:
+                print(f"{i}\t{ms:.0f}\t{describe(links[i - 1])}")
+            if not ranked:
+                raise LinkError("هیچ‌کدام از سرورها از این شبکه به مقصد نرسید.")
+            return 0
+        if not 1 <= args.pick <= len(links):
             raise LinkError(f"شماره باید بین ۱ و {len(links)} باشد.")
-        config = build_config(links[pick - 1])
+        config = build_config(links[args.pick - 1])
     except LinkError as exc:
         print(f"خطا: {exc}", file=sys.stderr)
         return 1

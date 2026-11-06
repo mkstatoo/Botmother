@@ -166,6 +166,116 @@ def test_subscription_cli_list_and_pick(sub_server, monkeypatch, capsys):
 
 
 def test_unreachable_subscription_is_a_clean_error(monkeypatch, capsys):
+    monkeypatch.setattr(xl.time, "sleep", lambda *_: None)
     monkeypatch.setattr("sys.stdin", __import__("io").StringIO("https://127.0.0.1:9/sub/x"))
     assert xl.main(["--list"]) == 1
+    assert "خطا" in capsys.readouterr().err
+
+
+def test_server_errors_are_retried_then_succeed(monkeypatch):
+    monkeypatch.setattr(xl.time, "sleep", lambda *_: None)
+    calls = {"n": 0}
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            return b"ok"
+
+    def fake_urlopen(req, timeout):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise xl.urllib.error.HTTPError(req.full_url, 500, "Internal Server Error", {}, None)
+        return Resp()
+
+    monkeypatch.setattr(xl.urllib.request, "urlopen", fake_urlopen)
+    assert xl.fetch_subscription("https://h.example/sub/x") == "ok"
+    assert calls["n"] == 3
+
+    # 4xx is not retried
+    calls["n"] = 0
+
+    def gone(req, timeout):
+        calls["n"] += 1
+        raise xl.urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(xl.urllib.request, "urlopen", gone)
+    with pytest.raises(LinkError):
+        xl.fetch_subscription("https://h.example/sub/x")
+    assert calls["n"] == 1
+
+
+def test_links_file_caches_and_is_private(tmp_path, monkeypatch, capsys):
+    cache = tmp_path / "links.txt"
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO("\n".join([L1, L2])))
+    # a plain list of links on stdin is not a URL → treated as ONE raw link, so feed a single link
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(L2))
+    assert xl.main(["--links-file", str(cache), "--list"]) == 0
+    assert oct(cache.stat().st_mode & 0o777) == "0o600"
+    # second call must not need stdin at all (the subscription may rate-limit repeated fetches)
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(""))
+    assert xl.main(["--links-file", str(cache), "--pick", "1"]) == 0
+    assert json.loads(capsys.readouterr().out.split("\n", 1)[1])["outbounds"][0]["protocol"] == "trojan"
+
+
+# ----------------------------------------------------------------------------- benchmark
+import os
+import socket
+import stat
+import sys
+from pathlib import Path
+
+FAKE_XRAY = Path(__file__).with_name("fake_xray.py")
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _ss(host: str) -> str:
+    userinfo = base64.urlsafe_b64encode(b"aes-256-gcm:pw").decode().rstrip("=")
+    return f"ss://{userinfo}@{host}:8388#{host}"
+
+
+def test_benchmark_ranks_by_delay_and_drops_dead_servers(tmp_path):
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"hi")
+
+        def log_message(self, *a):
+            pass
+
+    web = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=web.serve_forever, daemon=True).start()
+
+    wrapper = tmp_path / "xray"
+    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_XRAY}" "$@"\n')
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+
+    links = [_ss("ok-400.example"), _ss("dead.example"), _ss("ok-60.example"), _ss("ok-200.example")]
+    try:
+        ranked = xl.benchmark(links, str(wrapper), f"http://127.0.0.1:{web.server_port}/", workers=4, base_port=_free_port() + 50, timeout=5)
+    finally:
+        web.shutdown()
+
+    assert [i for i, _ in ranked] == [3, 4, 1]  # 60ms, 200ms, 400ms; index 2 (dead) is dropped
+    assert all(ms >= 50 for _, ms in ranked)
+
+
+def test_bench_cli_prints_ranking_and_fails_when_nothing_works(tmp_path, monkeypatch, capsys):
+    wrapper = tmp_path / "xray"
+    wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_XRAY}" "$@"\n')
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+    cache = tmp_path / "links.txt"
+    cache.write_text(_ss("dead.example") + "\n")
+    monkeypatch.setattr(xl.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 7, "stdout": ""})())
+    assert xl.main(["--links-file", str(cache), "--bench", "--xray", str(wrapper)]) == 1
     assert "خطا" in capsys.readouterr().err
