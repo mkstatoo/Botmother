@@ -33,7 +33,8 @@ from ..callbacks import A
 from ..db.models import BotUser, ChildBot, Content, Creator, Delivery
 from ..services.botops import bot_counts, purge_bot
 from ..ui import btn, kb, safe_delete, show, url_btn
-from ..util import esc, fmt_int, jdate
+from ..services.billing import describe
+from ..util import esc, fmt_int, fmt_toman, jdate, utcnow
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..app import App
@@ -41,7 +42,7 @@ if TYPE_CHECKING:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
-STATUS_LABEL = {"active": "✅ فعال", "paused": "⏸ متوقف (توسط شما)", "suspended": "⛔️ مسدود (توسط مدیریت)", "invalid": "⚠️ توکن نامعتبر"}
+STATUS_LABEL = {"active": "✅ فعال", "paused": "⏸ متوقف (توسط شما)", "suspended": "⛔️ مسدود (توسط مدیریت)", "expired": "💤 منقضی (نیاز به تمدید)", "invalid": "⚠️ توکن نامعتبر"}
 PAGE = 8
 
 
@@ -229,6 +230,7 @@ async def on_new_token(message: Message, state: FSMContext, app: App, creator: C
                 name=me.full_name,
                 token_enc=app.box.encrypt(token),
                 webhook_secret=secrets.token_urlsafe(24),
+                service_until=await app.billing.trial_end(),
             )
             s.add(child)
         else:
@@ -242,8 +244,10 @@ async def on_new_token(message: Message, state: FSMContext, app: App, creator: C
     await state.clear()
     await app.manager.restart(child)
     await _setup_child_commands(app, child)
+    cfg = await app.billing.config()
+    trial_note = f"🎁 {fmt_int(cfg.trial_days)} روز اول کاملاً رایگان است.\n\n" if cfg.trial_days and cfg.price_irt else ""
     await message.answer(
-        f"✅ ربات @{esc(child.username)} ساخته و فعال شد!\n\n"
+        f"✅ ربات @{esc(child.username)} ساخته و فعال شد!\n\n{trial_note}"
         "حالا با چند سؤال ساده آماده‌اش کنیم (کمتر از ۲ دقیقه). هر مرحله را می‌توانید رد کنید.",
         reply_markup=kb(
             [btn("⚡ تنظیم سریع (پیشنهادی)", "wz", child.id, "start")],
@@ -281,9 +285,11 @@ async def _owned(app: App, bot_id: int, owner_id: int) -> ChildBot | None:
 async def _detail(app: App, child: ChildBot):
     async with app.db.session() as s:
         counts = await bot_counts(s, child.id)
+    cfg = await app.billing.config()
     text = (
         f"🤖 <b>@{esc(child.username)}</b>\n"
         f"وضعیت: {STATUS_LABEL.get(child.status, child.status)}\n"
+        f"{describe(child, cfg, utcnow())}\n"
         f"ساخته‌شده: {jdate(child.created_at)}\n\n"
         f"👥 کاربران: {fmt_int(counts['users'])}\n"
         f"🎞 محتوا: {fmt_int(counts['contents'])}\n"
@@ -293,6 +299,8 @@ async def _detail(app: App, child: ChildBot):
         [url_btn("⚙️ باز کردن پنل", f"https://t.me/{child.username}?start=panel"), url_btn("🚀 ربات", f"https://t.me/{child.username}")],
         [btn("⚡ تنظیم سریع", "wz", child.id, "start")],
     ]
+    if child.service_until is not None:
+        rows.append([btn("💳 تمدید سرویس", "sv", child.id)])
     if child.status == "active":
         rows.append([btn("⏸ توقف موقت", "mpause", child.id)])
     elif child.status == "paused":
@@ -425,21 +433,37 @@ async def cmd_admin(message: Message, is_admin: bool, app: App) -> None:
 async def _admin_home(app: App):
     async with app.db.session() as s:
         creators = int(await s.scalar(select(func.count()).select_from(Creator)) or 0)
+        banned = int(await s.scalar(select(func.count()).select_from(Creator).where(Creator.is_banned.is_(True))) or 0)
         bots = int(await s.scalar(select(func.count()).select_from(ChildBot)) or 0)
         active = int(await s.scalar(select(func.count()).select_from(ChildBot).where(ChildBot.status == "active")) or 0)
         users = int(await s.scalar(select(func.count()).select_from(BotUser)) or 0)
         contents = int(await s.scalar(select(func.count()).select_from(Content)) or 0)
         deliveries = int(await s.scalar(select(func.count()).select_from(Delivery)) or 0)
+    st = await app.billing.stats()
+    cfg = await app.billing.config()
+    price = fmt_toman(cfg.price_irt) + f" / {fmt_int(cfg.period_days)} روز" if cfg.price_irt else "تعیین نشده"
     text = (
         "🛠 <b>مدیریت پلتفرم</b>\n\n"
-        f"👤 سازندگان: {fmt_int(creators)}\n"
+        f"👤 سازندگان: {fmt_int(creators)} (مسدود: {fmt_int(banned)})\n"
         f"🤖 ربات‌ها: {fmt_int(bots)} (فعال: {fmt_int(active)})\n"
         f"👥 کاربران ربات‌ها: {fmt_int(users)}\n"
         f"🎞 محتوا: {fmt_int(contents)}\n"
         f"📥 دریافت‌ها: {fmt_int(deliveries)}\n"
-        f"⚙️ ربات‌های در حال اجرا: {fmt_int(len(app.manager.runtimes))}"
+        f"⚙️ ربات‌های در حال اجرا: {fmt_int(len(app.manager.runtimes))}\n\n"
+        "<b>اشتراک سرویس</b>\n"
+        f"💵 قیمت: {price} · {'اعمال می‌شود' if cfg.enforced else 'اعمال نمی‌شود'}\n"
+        f"🎁 آزمایشی: {fmt_int(st['trial'])} · ✅ فعال: {fmt_int(st['active'])} · ⚠️ در مهلت: {fmt_int(st['grace'])} · 💤 منقضی: {fmt_int(st['expired'])} · ♾ نامحدود: {fmt_int(st['free'])}\n"
+        f"💰 درآمد ۳۰ روز اخیر: {fmt_toman(st['revenue30'])}"
     )
-    return text, kb([btn("🤖 لیست ربات‌ها", "adml", 0)], [btn("📣 پیام به سازندگان", "admbc")], [btn("🔙 بازگشت", "home")])
+    review = f" ({fmt_int(st['review'])})" if st["review"] else ""
+    return text, kb(
+        [btn("👤 سازندگان", "admc", 0), btn("🔎 جستجو", "admq")],
+        [btn("🤖 لیست ربات‌ها", "adml", 0)],
+        [btn(f"🧾 رسیدهای در انتظار{review}", "admrv"), btn("💰 پرداخت‌ها", "admpay")],
+        [btn("⚙️ تنظیمات اشتراک", "admset")],
+        [btn("📣 پیام به سازندگان", "admbc")],
+        [btn("🔙 بازگشت", "home")],
+    )
 
 
 @router.callback_query(A.filter(F.act == "adm"))
@@ -488,16 +512,27 @@ async def cb_admin_bot(callback: CallbackQuery, callback_data: A, is_admin: bool
     if child is None:
         await callback.answer("پیدا نشد.", show_alert=True)
         return
+    cfg = await app.billing.config()
     text = (
         f"🤖 <b>@{esc(child.username)}</b>\n"
         f"مالک: <code>{child.owner_id}</code>\n"
         f"وضعیت: {STATUS_LABEL.get(child.status, child.status)}\n"
+        f"{describe(child, cfg, utcnow())}\n"
         f"👥 {fmt_int(counts['users'])} · 🎞 {fmt_int(counts['contents'])} · 📥 {fmt_int(counts['deliveries'])}"
     )
     toggle = (
         btn("✅ رفع مسدودی", "admu", child.id) if child.status == "suspended" else btn("⛔️ مسدود کردن", "adms", child.id)
     )
-    await show(callback, text, kb([toggle], [btn("🔙 بازگشت", "adml", 0)]))
+    await show(
+        callback,
+        text,
+        kb(
+            [btn("🎁 +۷ روز", "admg", child.id, "7"), btn("🎁 +۳۰ روز", "admg", child.id, "30"), btn("🎁 روز دلخواه", "admgc", child.id)],
+            [btn("♾ نامحدود", "admgu", child.id), btn("⏹ پایان سرویس", "admge", child.id)],
+            [toggle, btn("👤 مالک", "admcd", child.owner_id)],
+            [btn("🔙 بازگشت", "adml", 0)],
+        ),
+    )
     await callback.answer()
 
 

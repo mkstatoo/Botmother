@@ -8,8 +8,10 @@ from .models import (
     Delivery,
     Payment,
     Plan,
+    PlatformSetting,
     Purchase,
     ScheduledDelete,
+    ServicePayment,
     Sponsor,
     Subscription,
 )
@@ -26,8 +28,10 @@ __all__ = [
     "Delivery",
     "Payment",
     "Plan",
+    "PlatformSetting",
     "Purchase",
     "ScheduledDelete",
+    "ServicePayment",
     "Sponsor",
     "Subscription",
 ]

@@ -75,6 +75,17 @@ def create_web_app(app: App) -> web.Application:
         )
         return _result_page(result.ok, result.message, result.bot_username)
 
+    @routes.get("/pay/service/{payment_id}")
+    async def service_callback(request: web.Request) -> web.Response:
+        try:
+            payment_id = int(request.match_info["payment_id"])
+        except ValueError:
+            raise web.HTTPNotFound() from None
+        result = await app.billing.handle_zarinpal_callback(
+            payment_id, request.query.get("Authority", ""), request.query.get("Status", "")
+        )
+        return _result_page(result.ok, result.message, result.bot_username)
+
     @routes.post("/pay/nowpayments/{payment_id}")
     async def nowpayments_ipn(request: web.Request) -> web.Response:
         try:

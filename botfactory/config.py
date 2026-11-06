@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     max_bots_per_user: int = 3
     broadcast_rate: int = 20  # messages per second
 
+    # --- platform service billing (defaults; the admin can override in the mother bot) ---
+    billing_enabled: bool = True
+    service_trial_days: int = 7
+    service_grace_days: int = 3
+    service_price_irt: int = 0  # Toman per period; 0 = billing not enforced until the admin sets a price
+    service_period_days: int = 30
+
     # --- payment gateways -------------------------------------------------
     zarinpal_base: str = "https://payment.zarinpal.com"
     nowpayments_base: str = "https://api.nowpayments.io/v1"

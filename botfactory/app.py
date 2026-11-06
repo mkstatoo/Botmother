@@ -28,6 +28,7 @@ from .db import ChildBot, Database
 from .manager import BotManager
 from .mother import build_mother_dispatcher
 from .polling import poll_forever
+from .services.billing import Billing
 from .services.cleanup import cleanup_loop
 from .services.payments import PaymentService
 
@@ -49,6 +50,7 @@ class App:
         self.storage = storage or self._make_storage()
         self.http: aiohttp.ClientSession | None = None
         self.mother_bot: Bot | None = None
+        self.mother_username: str | None = None
         self.mother_secret = self.box.derive("mother-webhook")
         self.background: set[asyncio.Task] = set()
         self._tasks: list[asyncio.Task] = []
@@ -56,6 +58,7 @@ class App:
 
         self.manager = BotManager(self)
         self.payments = PaymentService(self)
+        self.billing = Billing(self)
         self.mother_dp = build_mother_dispatcher(self)
         self.child_dp = build_child_dispatcher(self)
 
@@ -108,7 +111,9 @@ class App:
         from .web import create_web_app
 
         s = self.settings
-        await self.db.create_all()
+        added = await self.db.create_all()
+        if added:
+            log.info("database upgraded, columns added: %s", ", ".join(added))
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
         self.mother_bot = self.make_bot(s.bot_token)
 
@@ -116,6 +121,7 @@ class App:
         for attempt in range(1, 7):
             try:
                 me = await self.mother_bot.get_me()
+                self.mother_username = me.username
                 log.info("mother bot: @%s", me.username)
                 break
             except TelegramAPIError as exc:
@@ -136,9 +142,13 @@ class App:
         else:
             self._tasks.append(asyncio.create_task(poll_forever(self.mother_bot, self.mother_dp), name="mother-poll"))
 
+        migrated = await self.billing.backfill_legacy()
+        if migrated:
+            log.info("started a trial period for %d existing bot(s)", migrated)
         started = await self.manager.start_all()
         log.info("started %d child bot(s)", started)
         self._tasks.append(asyncio.create_task(cleanup_loop(self), name="cleanup"))
+        self._tasks.append(asyncio.create_task(self.billing.loop(), name="billing"))
 
         if s.web_enabled:
             self._runner = web.AppRunner(create_web_app(self))

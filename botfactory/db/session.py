@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -14,6 +14,33 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from .models import Base
+
+
+def _add_missing_columns(conn) -> list[str]:
+    """Additive schema sync: ``create_all`` never alters existing tables, so columns added in
+    newer versions are appended with ``ALTER TABLE`` (safe on SQLite and PostgreSQL)."""
+    insp = inspect(conn)
+    existing = set(insp.get_table_names())
+    added: list[str] = []
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing:
+            continue
+        have = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in have:
+                continue
+            if not col.nullable and col.server_default is None:
+                raise RuntimeError(f"cannot add NOT NULL column {table.name}.{col.name} without a server default")
+            ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(dialect=conn.dialect)}'
+            if col.server_default is not None:
+                arg = col.server_default.arg
+                lit = "'" + arg.replace("'", "''") + "'" if isinstance(arg, str) else str(arg.compile(dialect=conn.dialect))
+                ddl += f" DEFAULT {lit}"
+            if not col.nullable:
+                ddl += " NOT NULL"
+            conn.execute(text(ddl))
+            added.append(f"{table.name}.{col.name}")
+    return added
 
 
 class Database:
@@ -44,9 +71,11 @@ class Database:
         """Use as ``async with db.session() as s:``."""
         return self._maker()
 
-    async def create_all(self) -> None:
+    async def create_all(self) -> list[str]:
+        """Create missing tables and add missing columns; returns the columns added."""
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            return await conn.run_sync(_add_missing_columns)
 
     async def dispose(self) -> None:
         await self.engine.dispose()

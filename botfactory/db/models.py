@@ -17,6 +17,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -49,7 +51,7 @@ class ChildBot(Base):
     username: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(256), default="")
     token_enc: Mapped[str] = mapped_column(Text)
-    # active | paused | suspended (by platform admin) | invalid (token revoked)
+    # active | paused | suspended (by platform admin) | expired (service lapsed) | invalid (token revoked)
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
     webhook_secret: Mapped[str] = mapped_column(String(64))
     welcome_text: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -72,6 +74,41 @@ class ChildBot(Base):
     manual_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    # platform service (trial → paid). ``service_until`` None = exempt / unlimited.
+    service_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    service_paid: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    service_notice: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))  # last reminder stage sent
+
+
+class PlatformSetting(Base):
+    """Key/value settings editable by the platform admin from the mother bot."""
+
+    __tablename__ = "platform_settings"
+
+    key: Mapped[str] = mapped_column(String(48), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+
+
+class ServicePayment(Base):
+    """A creator's payment (or admin grant) extending a child bot's service period."""
+
+    __tablename__ = "service_payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    creator_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    days: Mapped[int] = mapped_column(Integer)
+    amount: Mapped[int] = mapped_column(BigInteger, default=0)  # Toman
+    method: Mapped[str] = mapped_column(String(10))  # zarinpal | manual | admin
+    # pending | review | paid | failed | rejected
+    status: Mapped[str] = mapped_column(String(10), default="pending", index=True)
+    authority: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    receipt_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    receipt_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class BotUser(Base):
