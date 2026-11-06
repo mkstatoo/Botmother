@@ -49,7 +49,7 @@ class PaymentError(Exception):
 
 @dataclass
 class Target:
-    kind: str  # "content" | "plan"
+    kind: str  # "content" | "plan" | "order"
     id: int
     title: str
     price_irt: int | None
@@ -157,6 +157,7 @@ class PaymentService:
             kind=target.kind,
             content_id=target.id if target.kind == "content" else None,
             plan_id=target.id if target.kind == "plan" else None,
+            order_id=target.id if target.kind == "order" else None,
             method=method,
             amount=int(amount),
             currency=currency,
@@ -399,6 +400,8 @@ class PaymentService:
         if p.kind == "plan" and p.plan_id:
             pl = await s.get(Plan, p.plan_id)
             return f"اشتراک {pl.name}" if pl else "اشتراک"
+        if p.kind == "order":
+            return f"سفارش #{p.order_id}"
         return "خرید"
 
     async def fulfill(self, payment_id: int, ref: str | None = None) -> bool:
@@ -423,6 +426,8 @@ class PaymentService:
                 )
                 if exists is None:
                     s.add(Purchase(bot_id=p.bot_id, user_id=p.user_id, content_id=p.content_id, payment_id=p.id))
+            elif p.kind == "order":
+                await self.app.shop.mark_paid(s, p)
             elif p.kind == "plan" and p.plan_id:
                 plan = await s.get(Plan, p.plan_id)
                 days = plan.days if plan else 30
@@ -453,11 +458,15 @@ class PaymentService:
                 p = await s.get(Payment, payment_id)
                 if p is None:
                     return
+                is_order = p.kind == "order"
                 child = await s.get(ChildBot, p.bot_id)
                 content = await s.get(Content, p.content_id) if p.content_id else None
                 title = await self._target_title(s, p)
                 until = await subscription_until(s, p.bot_id, p.user_id) if p.kind == "plan" else None
                 buyer = await s.get(BotUser, (p.bot_id, p.user_id))
+            if is_order:  # outside the session: it talks to Telegram
+                await self.app.shop.after_paid(p)
+                return
             bot = self.app.manager.get_bot(child.id) if child else None
             if bot is None or child is None:
                 return

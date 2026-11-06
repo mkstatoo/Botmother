@@ -8,7 +8,7 @@ from aiogram.exceptions import TelegramForbiddenError
 from aiogram.types import ErrorEvent
 
 from ..routing import attach
-from . import admin_content, admin_manage, user
+from . import admin_content, admin_manage, shop_admin, shop_user, user
 from .middleware import ChildContext
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -22,7 +22,7 @@ def build_child_dispatcher(app: App) -> Dispatcher:
     dp = Dispatcher(storage=app.storage, name="children")
     dp.update.outer_middleware(ChildContext(app))
     # order matters: /start first, then owner routers (media uploads), end-user router last
-    attach(dp, user.start_router, admin_content.router, admin_manage.router, user.router)
+    attach(dp, user.start_router, shop_admin.router, admin_content.router, admin_manage.router, shop_user.router, user.router)
 
     @dp.errors()
     async def on_error(event: ErrorEvent) -> bool:

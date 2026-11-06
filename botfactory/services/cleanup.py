@@ -50,6 +50,7 @@ async def cleanup_once(app: App) -> int:
             .values(status="expired")
         )
         await s.commit()
+    await app.shop.gc(now)  # self rate-limited (every few minutes)
     return deleted
 
 

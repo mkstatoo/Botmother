@@ -80,6 +80,11 @@ class ChildBot(Base):
     service_paid: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     service_notice: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))  # last reminder stage sent
 
+    # shop module (opt-in per bot)
+    shop_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    shop_shipping_irt: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))  # flat shipping, Toman
+    shop_free_over_irt: Mapped[int | None] = mapped_column(Integer, nullable=True)  # free shipping from this subtotal
+
 
 class PlatformSetting(Base):
     """Key/value settings editable by the platform admin from the mother bot."""
@@ -225,9 +230,10 @@ class Payment(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     bot_id: Mapped[int] = mapped_column(BigInteger, index=True)
     user_id: Mapped[int] = mapped_column(BigInteger)
-    kind: Mapped[str] = mapped_column(String(8))  # content | plan
+    kind: Mapped[str] = mapped_column(String(8))  # content | plan | order
     content_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     plan_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    order_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     method: Mapped[str] = mapped_column(String(10))  # zarinpal | crypto | manual
     amount: Mapped[int] = mapped_column(BigInteger)
     currency: Mapped[str] = mapped_column(String(3))  # IRT | USD
@@ -262,3 +268,75 @@ class ScheduledDelete(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger)
     message_id: Mapped[int] = mapped_column(Integer)
     delete_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+# ----------------------------------------------------------------------------- shop
+class ShopCategory(Base):
+    __tablename__ = "shop_categories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    name: Mapped[str] = mapped_column(String(128))
+
+
+class Product(Base):
+    __tablename__ = "products"
+    __table_args__ = (Index("ix_product_bot_active", "bot_id", "is_active"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_id: Mapped[int] = mapped_column(BigInteger)
+    category_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    price_irt: Mapped[int] = mapped_column(Integer)  # Toman
+    compare_price_irt: Mapped[int | None] = mapped_column(Integer, nullable=True)  # struck-through "before" price
+    stock: Mapped[int | None] = mapped_column(Integer, nullable=True)  # None = unlimited
+    photo_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)  # Telegram file_id: nothing stored locally
+    needs_shipping: Mapped[bool] = mapped_column(Boolean, default=True)
+    content_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # digital product: auto-delivered after payment
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    sold: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CartItem(Base):
+    __tablename__ = "cart_items"
+
+    bot_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    product_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    qty: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class Order(Base):
+    __tablename__ = "orders"
+    __table_args__ = (Index("ix_order_bot_status", "bot_id", "status"), Index("ix_order_bot_user", "bot_id", "user_id"))
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_id: Mapped[int] = mapped_column(BigInteger)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    # pending (awaiting payment) | paid | shipped | delivered | cancelled
+    status: Mapped[str] = mapped_column(String(10), default="pending")
+    subtotal: Mapped[int] = mapped_column(Integer, default=0)
+    shipping: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    needs_shipping: Mapped[bool] = mapped_column(Boolean, default=True)
+    name: Mapped[str] = mapped_column(String(128), default="")
+    phone: Mapped[str] = mapped_column(String(32), default="")
+    address: Mapped[str] = mapped_column(Text, default="")
+    tracking: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    flag: Mapped[str | None] = mapped_column(String(16), nullable=True)  # oversold: paid after the stock was released
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class OrderItem(Base):
+    __tablename__ = "order_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(Integer, index=True)
+    product_id: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(255))  # snapshot: survives product edits/deletion
+    unit_price: Mapped[int] = mapped_column(Integer)
+    qty: Mapped[int] = mapped_column(Integer)

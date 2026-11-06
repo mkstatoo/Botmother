@@ -14,7 +14,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy import func, select
 
 from ..callbacks import A
-from ..db.models import BotUser, Category, ChildBot, Content, Plan, Purchase
+from ..db.models import BotUser, Category, ChildBot, Content, Order, Plan, Product, Purchase
 from ..services.access import Decision, check_access, subscription_until
 from ..services.delivery import KIND_ICON, ContentUnavailable, deliver
 from ..services.payments import METHOD_LABEL, PaymentError, Target
@@ -42,7 +42,8 @@ start_router.message.filter(F.chat.type == ChatType.PRIVATE)
 
 # ----------------------------------------------------------------------------- start / home
 async def send_home(ui: Message | CallbackQuery, app: App, child: ChildBot, is_owner: bool) -> None:
-    await show(ui, welcome_text(child), await home_markup(app, child, is_owner))
+    uid = ui.from_user.id if ui.from_user else None
+    await show(ui, welcome_text(child), await home_markup(app, child, is_owner, uid))
 
 
 @start_router.message(CommandStart(deep_link=True))
@@ -53,6 +54,15 @@ async def cmd_start_deep(
     payload = command.args or ""
     if payload.startswith("c_") and payload[2:].isdigit():
         await request_content(message, int(payload[2:]), app=app, child=child, is_owner=is_owner, user_id=message.from_user.id)  # type: ignore[union-attr]
+    elif payload.startswith("s_") and payload[2:].isdigit() and child.shop_enabled:
+        from .shop_user import show_product
+
+        await show_product(message, app, child, int(payload[2:]), 0, is_owner)
+    elif payload == "shop" and is_owner:
+        from .shop_admin import menu_view
+
+        text, markup = await menu_view(app, child)
+        await message.answer(text, reply_markup=markup)
     elif payload == "panel" and is_owner:
         await message.answer(PANEL_TEXT.format(username=esc(child.username)), reply_markup=panel_markup())
     else:
@@ -267,6 +277,10 @@ async def cb_pay(callback: CallbackQuery, callback_data: A, state: FSMContext, a
             obj = await s.get(Plan, callback_data.id)
             valid = obj is not None and obj.bot_id == child.id and obj.is_active
             target = Target("plan", obj.id, f"اشتراک {obj.name}", obj.price_irt, obj.price_usd_cents) if valid and obj else None
+        elif kind == "o":
+            obj = await s.get(Order, callback_data.id)
+            valid = obj is not None and obj.bot_id == child.id and obj.user_id == user_id and obj.status == "pending"
+            target = Target("order", obj.id, f"سفارش #{obj.id}", obj.total, None) if valid and obj else None
         else:
             target = None
     if target is None:
@@ -304,9 +318,7 @@ async def cb_pay(callback: CallbackQuery, callback_data: A, state: FSMContext, a
         callback,
         f"💳 <b>{esc(target.title)}</b>\n💰 مبلغ: {fmt_money(payment.amount, payment.currency)}\n\n"
         "روی دکمه زیر بزنید و پرداخت را کامل کنید. بعد از پرداخت موفق، "
-        + ("فایل" if target.kind == "content" else "اشتراک")
-        + " به‌صورت خودکار برای شما "
-        + ("ارسال" if target.kind == "content" else "فعال")
+        + {"content": "فایل به‌صورت خودکار برای شما ارسال", "plan": "اشتراک به‌صورت خودکار برای شما فعال", "order": "سفارش شما ثبت و پیگیری آن از «سفارش‌های من» ممکن"}[target.kind]
         + " می‌شود.",
         kb([url_btn("💳 رفتن به صفحه پرداخت", url)], [btn("🏠 منوی اصلی", "home")]),
     )
@@ -384,9 +396,21 @@ async def on_search(message: Message, app: App, child: ChildBot) -> None:
                 )
             ).all()
         )
-    if not items:
-        await message.answer("🔎 نتیجه‌ای پیدا نشد.", reply_markup=kb([btn("📚 همه محتواها", "list", 0, "c")]))
+    products = []
+    if child.shop_enabled:
+        async with app.db.session() as s:
+            products = (
+                await s.execute(
+                    select(Product.id, Product.title, Product.price_irt)
+                    .where(Product.bot_id == child.id, Product.is_active.is_(True), Product.title.ilike(like))
+                    .order_by(Product.id.desc())
+                    .limit(10)
+                )
+            ).all()
+    if not items and not products:
+        await message.answer("🔎 نتیجه‌ای پیدا نشد.", reply_markup=kb([btn("🛍 فروشگاه" if child.shop_enabled else "📚 همه محتواها", "shop" if child.shop_enabled else "list", 0, "" if child.shop_enabled else "c")]))
         return
-    rows = [[btn(f"{'💎' if c.access == 'premium' else KIND_ICON.get(c.kind, '📦')} {trunc(c.title)}", "get", c.id)] for c in items]
+    rows = [[btn(f"🛍 {trunc(t, 26)} — {fmt_int(pr)}", "shp", pid, "0")] for pid, t, pr in products]
+    rows += [[btn(f"{'💎' if c.access == 'premium' else KIND_ICON.get(c.kind, '📦')} {trunc(c.title)}", "get", c.id)] for c in items]
     rows.append([btn("🏠 منوی اصلی", "home")])
-    await message.answer(f"🔎 {fmt_int(len(items))} نتیجه:", reply_markup=kb(*rows))
+    await message.answer(f"🔎 {fmt_int(len(items) + len(products))} نتیجه:", reply_markup=kb(*rows))

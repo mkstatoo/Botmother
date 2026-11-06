@@ -252,6 +252,7 @@ async def on_new_token(message: Message, state: FSMContext, app: App, creator: C
         reply_markup=kb(
             [btn("⚡ تنظیم سریع (پیشنهادی)", "wz", child.id, "start")],
             [url_btn("⚙️ باز کردن پنل ربات", f"https://t.me/{child.username}?start=panel")],
+            [url_btn("🛍 راه‌اندازی فروشگاه", f"https://t.me/{child.username}?start=shop")],
             [btn("🤖 ربات‌های من", "list")],
         ),
     )

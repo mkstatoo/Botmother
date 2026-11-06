@@ -53,3 +53,34 @@ class BroadcastS(StatesGroup):
 
 class Receipt(StatesGroup):
     waiting = State()
+
+
+class Checkout(StatesGroup):
+    name = State()
+    phone = State()
+    address = State()
+
+
+class ProductAdd(StatesGroup):
+    title = State()
+    price = State()
+    stock = State()
+    photo = State()
+    desc = State()
+
+
+class ProductEdit(StatesGroup):
+    value = State()
+
+
+class ShopCatS(StatesGroup):
+    name = State()
+
+
+class ShopSet(StatesGroup):
+    shipping = State()
+    free_over = State()
+
+
+class OrderShip(StatesGroup):
+    tracking = State()
