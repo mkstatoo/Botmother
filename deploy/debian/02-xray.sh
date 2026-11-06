@@ -68,9 +68,9 @@ systemctl enable xray >/dev/null 2>&1
 
 try_pick() {  # try_pick N → 0 اگر تلگرام از طریق این سرور واقعاً در دسترس بود
   local n="$1" code
-  xl --pick "$n" > "$CFG_DIR/config.json.new" </dev/null || { rm -f "$CFG_DIR/config.json.new"; return 2; }
-  "$BIN" run -test -c "$CFG_DIR/config.json.new" >/dev/null || { rm -f "$CFG_DIR/config.json.new"; return 2; }
-  mv "$CFG_DIR/config.json.new" "$CFG_DIR/config.json"
+  xl --pick "$n" > "$CFG_DIR/config.new.json" </dev/null || { rm -f "$CFG_DIR/config.new.json"; return 2; }
+  "$BIN" run -test -c "$CFG_DIR/config.new.json" >/dev/null || { rm -f "$CFG_DIR/config.new.json"; return 2; }
+  mv "$CFG_DIR/config.new.json" "$CFG_DIR/config.json"
   chown root:nogroup "$CFG_DIR/config.json"; chmod 640 "$CFG_DIR/config.json"
   install_unit
   systemctl restart xray
