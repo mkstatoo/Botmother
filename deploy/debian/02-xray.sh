@@ -58,9 +58,6 @@ ExecStart=/usr/local/bin/xray run -c /usr/local/etc/xray/config.json
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -77,9 +74,22 @@ try_pick() {  # try_pick N → 0 اگر تلگرام از طریق این سرو
   chown root:nogroup "$CFG_DIR/config.json"; chmod 640 "$CFG_DIR/config.json"
   install_unit
   systemctl restart xray
-  sleep 3
+  local i
+  for i in $(seq 1 12); do
+    (exec 3<>/dev/tcp/127.0.0.1/1080) 2>/dev/null && break
+    sleep 1
+  done
+  if ! (exec 3<>/dev/tcp/127.0.0.1/1080) 2>/dev/null; then
+    echo "  ✘ سرویس xray روی پورت 1080 بالا نیامد. وضعیت:" >&2
+    systemctl status xray --no-pager -l 2>&1 | head -12 >&2 || true
+    journalctl -u xray -n 12 --no-pager 2>&1 >&2 || true
+    return 3
+  fi
   code="$(curl -s -o /dev/null -m 15 --noproxy '' -w '%{http_code}' --socks5-hostname 127.0.0.1:1080 https://api.telegram.org/ || true)"
-  [ -n "$code" ] && [ "$code" != "000" ]
+  if [ -n "$code" ] && [ "$code" != "000" ]; then return 0; fi
+  echo "  ✘ سرویس بالا آمد ولی تلگرام جواب نداد (کد ${code:-خالی})." >&2
+  journalctl -u xray -n 8 --no-pager 2>&1 >&2 || true
+  return 1
 }
 
 ANS=a

@@ -48,10 +48,6 @@ ExecStart=$APP_DIR/venv/bin/python -m botfactory
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$APP_DIR/data
 
 [Install]
 WantedBy=multi-user.target
@@ -61,6 +57,7 @@ systemctl enable botmother >/dev/null 2>&1
 systemctl restart botmother
 sleep 6
 systemctl --no-pager --lines=15 status botmother || true
+systemctl is-active --quiet botmother || { echo '✘ سرویس botmother بالا نیامد:' >&2; journalctl -u botmother -n 25 --no-pager >&2; exit 1; }
 
 # پشتیبان شبانه ساعت ۳
 CRON=/etc/cron.d/botmother-backup
