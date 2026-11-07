@@ -368,6 +368,9 @@ def describe(link: str) -> str:
 
 def resolve_links(text: str) -> list[str]:
     text = text.strip()
+    tokens = text.split()
+    if len(tokens) > 1 and all("://" in t for t in tokens):  # several links, one per line / space-separated
+        return tokens
     if is_subscription_url(text):
         return parse_subscription(fetch_subscription(text))
     return [text]

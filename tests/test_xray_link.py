@@ -279,3 +279,10 @@ def test_bench_cli_prints_ranking_and_fails_when_nothing_works(tmp_path, monkeyp
     monkeypatch.setattr(xl.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 7, "stdout": ""})())
     assert xl.main(["--links-file", str(cache), "--bench", "--xray", str(wrapper)]) == 1
     assert "خطا" in capsys.readouterr().err
+
+
+def test_resolve_links_splits_several_pasted_links():
+    a, b = "ss://YWVzLTI1Ni1nY206cHc@a.example:8388#a", "trojan://pw@b.example:443#b"
+    assert xl.resolve_links(f"{a}\n{b}\n") == [a, b]
+    assert xl.resolve_links(f"{a} {b}") == [a, b]
+    assert xl.resolve_links(a) == [a]
