@@ -110,16 +110,28 @@ async def show_product(ui: Message | CallbackQuery, app: App, child: ChildBot, p
         return
     desc = (p.description or "").strip()
     text = f"🛍 <b>{esc(p.title)}</b>\n\n" + (esc(desc[:700]) + ("…" if len(desc) > 700 else "") + "\n\n" if desc else "") + price_line(p)
-    note = stock_text(p.stock)
+    note = "" if await app.shop.has_variants(p.id) else stock_text(p.stock)
     if note:
         text += f"\n{note}"
     if not p.needs_shipping:
         text += "\n📥 کالای دیجیتال — بعد از پرداخت همین‌جا تحویل داده می‌شود."
-    sold_out = p.stock is not None and p.stock <= 0
-    markup = kb(
-        [btn("❌ ناموجود", "shno") if sold_out else btn("➕ افزودن به سبد", "sha", p.id)],
-        [btn("🛒 سبد خرید", "shcart"), btn("🔙 بازگشت", "shl" if back else "shop", back, "0")],
-    )
+    variants = await app.shop.variants_of(p.id)
+    if variants:
+        text += "\n\n🎨 یکی از گزینه‌ها را انتخاب کنید تا به سبد اضافه شود:"
+        rows = []
+        for v in variants:
+            gone = v.stock is not None and v.stock <= 0
+            extra = f" · {fmt_int(v.price_irt)}" if v.price_irt and v.price_irt != p.price_irt else ""
+            low = f" ({fmt_int(v.stock)} عدد)" if v.stock is not None and 0 < v.stock <= 3 else ""
+            rows.append(btn(f"{'❌ ' if gone else ''}{trunc(v.label, 22)}{extra}{low}", "shno" if gone else "sha", p.id, str(v.id)))
+        grid = [rows[i : i + 2] for i in range(0, len(rows), 2)]
+        markup = kb(*grid, [btn("🛒 سبد خرید", "shcart"), btn("🔙 بازگشت", "shl" if back else "shop", back, "0")])
+    else:
+        sold_out = p.stock is not None and p.stock <= 0
+        markup = kb(
+            [btn("❌ ناموجود", "shno") if sold_out else btn("➕ افزودن به سبد", "sha", p.id)],
+            [btn("🛒 سبد خرید", "shcart"), btn("🔙 بازگشت", "shl" if back else "shop", back, "0")],
+        )
     chat_msg = ui.message if isinstance(ui, CallbackQuery) else ui
     if p.photo_file_id and isinstance(chat_msg, Message):
         try:
@@ -150,9 +162,11 @@ async def cb_add(callback: CallbackQuery, callback_data: A, app: App, child: Chi
     if not _guard(child):
         await callback.answer("فروشگاه فعال نیست.", show_alert=True)
         return
-    result = await app.shop.change_qty(child.id, callback.from_user.id, callback_data.id, +1)
+    vid = int(callback_data.p) if callback_data.p.isdigit() else 0
+    result = await app.shop.change_qty(child.id, callback.from_user.id, callback_data.id, +1, vid)
     msg = {
         "ok": "✅ به سبد خرید اضافه شد.",
+        "choose": "ابتدا یکی از گزینه‌ها (مثلاً سایز یا رنگ) را انتخاب کنید.",
         "soldout": "این کالا فعلاً موجود نیست.",
         "max": f"حداکثر تعداد مجاز (موجودی یا {fmt_int(MAX_QTY)} عدد) در سبد است.",
         "missing": "این کالا دیگر در دسترس نیست.",
@@ -169,9 +183,10 @@ async def _cart_view(app: App, child: ChildBot, user_id: int):
     rows = []
     for line in lines:
         p = line.product
-        warn = " ⚠️ موجودی کم" if (p.stock is not None and p.stock < line.qty) else ""
-        out.append(f"• {esc(p.title)} × {fmt_int(line.qty)} — {fmt_toman(line.amount)}{warn}")
-        rows.append([btn("➖", "shq", p.id, "-"), btn(f"{trunc(p.title, 16)} · {fmt_int(line.qty)}", "shp", p.id, "0"), btn("➕", "shq", p.id, "+"), btn("🗑", "shq", p.id, "x")])
+        vid = line.variant.id if line.variant is not None else 0
+        warn = " ⚠️ موجودی کم" if (line.stock is not None and line.stock < line.qty) else ""
+        out.append(f"• {esc(line.title)} × {fmt_int(line.qty)} — {fmt_toman(line.amount)}{warn}")
+        rows.append([btn("➖", "shq", p.id, f"-{vid}"), btn(f"{trunc(line.title, 16)} · {fmt_int(line.qty)}", "shp", p.id, "0"), btn("➕", "shq", p.id, f"+{vid}"), btn("🗑", "shq", p.id, f"x{vid}")])
     out += ["", f"جمع کالاها: {fmt_toman(q.subtotal)}"]
     if q.needs_shipping:
         out.append(f"هزینه ارسال: {fmt_toman(q.shipping) if q.shipping else 'رایگان'}")
@@ -196,11 +211,12 @@ async def cb_cart(callback: CallbackQuery, state: FSMContext, app: App, child: C
 
 @router.callback_query(A.filter(F.act == "shq"))
 async def cb_qty(callback: CallbackQuery, callback_data: A, app: App, child: ChildBot) -> None:
-    delta = {"+": 1, "-": -1, "x": 0}.get(callback_data.p)
-    if delta is None:
+    op, rest = callback_data.p[:1], callback_data.p[1:]
+    delta = {"+": 1, "-": -1, "x": 0}.get(op)
+    if delta is None or (rest and not rest.isdigit()):
         await callback.answer()
         return
-    result = await app.shop.change_qty(child.id, callback.from_user.id, callback_data.id, delta)
+    result = await app.shop.change_qty(child.id, callback.from_user.id, callback_data.id, delta, int(rest or 0))
     if result in ("soldout", "max"):
         await callback.answer("تعداد بیشتر از موجودی/حد مجاز است.", show_alert=True)
         return
@@ -251,9 +267,9 @@ async def cb_checkout(callback: CallbackQuery, state: FSMContext, app: App, chil
     if not lines:
         await callback.answer("سبد خرید خالی است.", show_alert=True)
         return
-    bad = next((ln for ln in lines if ln.product.stock is not None and ln.product.stock < ln.qty), None)
+    bad = next((ln for ln in lines if ln.stock is not None and ln.stock < ln.qty), None)
     if bad is not None:
-        await callback.answer(f"موجودی «{bad.product.title}» کافی نیست.", show_alert=True)
+        await callback.answer(f"موجودی «{bad.title}» کافی نیست.", show_alert=True)
         return
     await callback.answer()
     if not quote(child, lines).needs_shipping:

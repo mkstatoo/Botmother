@@ -299,12 +299,28 @@ class Product(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class ProductVariant(Base):
+    """A size / colour / … option of a product with its own stock (and optionally its own price)."""
+
+    __tablename__ = "product_variants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    bot_id: Mapped[int] = mapped_column(BigInteger)
+    product_id: Mapped[int] = mapped_column(Integer, index=True)
+    label: Mapped[str] = mapped_column(String(100))
+    price_irt: Mapped[int | None] = mapped_column(Integer, nullable=True)  # None = the product's price
+    stock: Mapped[int | None] = mapped_column(Integer, nullable=True)  # None = unlimited
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class CartItem(Base):
     __tablename__ = "cart_items"
 
     bot_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
     product_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    variant_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False, default=0)  # 0 = no variant
     qty: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
@@ -337,6 +353,7 @@ class OrderItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     order_id: Mapped[int] = mapped_column(Integer, index=True)
     product_id: Mapped[int] = mapped_column(Integer)
-    title: Mapped[str] = mapped_column(String(255))  # snapshot: survives product edits/deletion
+    variant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    title: Mapped[str] = mapped_column(String(255))  # snapshot ("name — option"): survives edits/deletion
     unit_price: Mapped[int] = mapped_column(Integer)
     qty: Mapped[int] = mapped_column(Integer)

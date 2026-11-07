@@ -43,6 +43,21 @@ def _add_missing_columns(conn) -> list[str]:
     return added
 
 
+# Tables that hold only temporary data and whose primary key changed: they are dropped and recreated
+# (``ALTER TABLE`` cannot change a primary key). {table: column that identifies the new layout}
+_RECREATE_IF_MISSING = {"cart_items": "variant_id"}
+
+
+def _recreate_changed_tables(conn) -> list[str]:
+    insp = inspect(conn)
+    dropped = []
+    for table, col in _RECREATE_IF_MISSING.items():
+        if insp.has_table(table) and col not in {c["name"] for c in insp.get_columns(table)}:
+            conn.execute(text(f'DROP TABLE "{table}"'))
+            dropped.append(table)
+    return dropped
+
+
 class Database:
     def __init__(self, url: str) -> None:
         parsed = make_url(url)
@@ -74,8 +89,9 @@ class Database:
     async def create_all(self) -> list[str]:
         """Create missing tables and add missing columns; returns the columns added."""
         async with self.engine.begin() as conn:
+            recreated = await conn.run_sync(_recreate_changed_tables)
             await conn.run_sync(Base.metadata.create_all)
-            return await conn.run_sync(_add_missing_columns)
+            return [f"{t} (recreated)" for t in recreated] + await conn.run_sync(_add_missing_columns)
 
     async def dispose(self) -> None:
         await self.engine.dispose()

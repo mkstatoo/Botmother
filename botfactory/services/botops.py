@@ -17,6 +17,7 @@ from ..db.models import (
     Payment,
     Plan,
     Product,
+    ProductVariant,
     Purchase,
     ScheduledDelete,
     ShopCategory,
@@ -24,7 +25,7 @@ from ..db.models import (
     Subscription,
 )
 
-_BOT_SCOPED = (CartItem, ShopCategory, Product, Sponsor, Category, Content, Plan, Subscription, Purchase, Payment, Delivery, ScheduledDelete, BotUser)
+_BOT_SCOPED = (CartItem, ShopCategory, ProductVariant, Product, Sponsor, Category, Content, Plan, Subscription, Purchase, Payment, Delivery, ScheduledDelete, BotUser)
 
 
 async def purge_bot(session: AsyncSession, bot_id: int) -> None:

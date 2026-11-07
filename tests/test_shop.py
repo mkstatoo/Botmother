@@ -522,3 +522,206 @@ async def test_shop_deep_link_and_mother_button(env):
     env.fake.clear()
     await env.say(BOT, USER, "/start shop")  # strangers get the normal home instead
     assert not has_text(env, BOT, "مدیریت فروشگاه", USER)
+
+
+# ------------------------------------------------------------------------------ variants (size / colour)
+from botfactory.db import ProductVariant  # noqa: E402
+
+
+async def variants_of(env, pid) -> list[ProductVariant]:
+    return await db_all(env, select(ProductVariant).where(ProductVariant.product_id == pid).order_by(ProductVariant.id))
+
+
+async def shoe_with_variants(env, **fields):
+    p = await new_product(env, title="کفش", price=100000, stock=None, **fields)
+    async with env.app.db.session() as s:
+        s.add_all(
+            [
+                ProductVariant(bot_id=BOT, product_id=p.id, label="۴۲ مشکی", stock=3),
+                ProductVariant(bot_id=BOT, product_id=p.id, label="۴۳ سفید", stock=2, price_irt=120000),
+                ProductVariant(bot_id=BOT, product_id=p.id, label="۴۴ قهوه‌ای", stock=0),
+            ]
+        )
+        await s.commit()
+    return p, await variants_of(env, p.id)
+
+
+async def test_owner_adds_edits_and_removes_variants(env):
+    await shop_bot(env)
+    p = await new_product(env, stock=None)
+    await env.tap(BOT, OWNER, pack("sav", p.id))
+    await env.tap(BOT, OWNER, pack("sava", p.id))
+    await env.say(BOT, OWNER, "۴۲ مشکی | ۵\nخراب | abc")  # one bad line → nothing is saved
+    assert not await variants_of(env, p.id)
+    assert has_text(env, BOT, "خراب", OWNER)
+    await env.say(BOT, OWNER, "۴۲ مشکی | ۵\n۴۳ مشکی | - \n۴۳ سفید | ۲ | ۴۹۰٬۰۰۰")
+    vs = await variants_of(env, p.id)
+    assert [(v.label, v.stock, v.price_irt) for v in vs] == [("۴۲ مشکی", 5, None), ("۴۳ مشکی", None, None), ("۴۳ سفید", 2, 490000)]
+
+    v = vs[0]
+    await env.tap(BOT, OWNER, pack("save", v.id, "stock"))
+    await env.say(BOT, OWNER, "9")
+    await env.tap(BOT, OWNER, pack("save", v.id, "price"))
+    await env.say(BOT, OWNER, "130000")
+    await env.tap(BOT, OWNER, pack("save", v.id, "label"))
+    await env.say(BOT, OWNER, "۴۲ مشکی (نو)")
+    v = (await variants_of(env, p.id))[0]
+    assert (v.label, v.stock, v.price_irt) == ("۴۲ مشکی (نو)", 9, 130000)
+    await env.tap(BOT, OWNER, pack("savt", v.id))
+    assert not (await variants_of(env, p.id))[0].is_active
+    await env.tap(BOT, OWNER, pack("savx", v.id))
+    assert len(await variants_of(env, p.id)) == 2
+    await env.tap(BOT, USER, pack("savx", vs[1].id))  # strangers can't
+    assert len(await variants_of(env, p.id)) == 2
+
+
+async def test_buyer_must_pick_a_variant_and_prices_follow_it(env):
+    await shop_bot(env)
+    p, vs = await shoe_with_variants(env)
+    await env.tap(BOT, USER, pack("shp", p.id, "0"))
+    page = env.fake.last("SendMessage", BOT) if not env.fake.find("EditMessageText", BOT) else env.fake.last("EditMessageText", BOT)
+    acts = [b["callback_data"] for b in buttons(page)]
+    assert pack("sha", p.id, str(vs[0].id)) in acts and pack("sha", p.id, str(vs[1].id)) in acts
+    assert pack("shno", p.id, str(vs[2].id)) in acts and pack("sha", p.id, str(vs[2].id)) not in acts  # sold-out option is only a notice
+    assert pack("sha", p.id) not in acts  # no plain add button
+
+    await env.tap(BOT, USER, pack("sha", p.id))  # forged: product without choosing
+    assert not await db_all(env, select(CartItem))
+    await env.tap(BOT, USER, pack("sha", p.id, str(vs[2].id)))  # sold-out variant
+    assert not await db_all(env, select(CartItem))
+    await env.tap(BOT, USER, pack("sha", p.id, "999999"))  # unknown variant
+    assert not await db_all(env, select(CartItem))
+
+    await env.tap(BOT, USER, pack("sha", p.id, str(vs[1].id)))
+    await env.tap(BOT, USER, pack("sha", p.id, str(vs[1].id)))
+    await env.tap(BOT, USER, pack("sha", p.id, str(vs[1].id)))  # exceeds its stock of 2
+    await env.tap(BOT, USER, pack("sha", p.id, str(vs[0].id)))
+    qty = {r.variant_id: r.qty for r in await db_all(env, select(CartItem))}
+    assert qty == {vs[1].id: 2, vs[0].id: 1}
+
+    await env.tap(BOT, USER, pack("shcart"))
+    text = env.fake.last("EditMessageText", BOT).data["text"]
+    assert "کفش — ۴۳ سفید" in text and "کفش — ۴۲ مشکی" in text
+    assert "۳۴۰٬۰۰۰ تومان" in text  # 2×120k (variant price) + 1×100k (product price)
+
+    await env.tap(BOT, USER, pack("shq", p.id, f"-{vs[1].id}"))
+    await env.tap(BOT, USER, pack("shq", p.id, f"x{vs[0].id}"))
+    assert {r.variant_id: r.qty for r in await db_all(env, select(CartItem))} == {vs[1].id: 1}
+
+
+async def test_variant_stock_is_reserved_released_and_snapshotted(env):
+    await shop_bot(env)
+    p, vs = await shoe_with_variants(env)
+    v = vs[0]
+    await env.tap(BOT, USER, pack("sha", p.id, str(v.id)))
+    await env.tap(BOT, USER, pack("sha", p.id, str(v.id)))
+    order = await checkout(env)
+    items = await db_all(env, select(OrderItem))
+    assert [(i.title, i.variant_id, i.unit_price, i.qty) for i in items] == [("کفش — ۴۲ مشکی", v.id, 100000, 2)]
+    assert (await variants_of(env, p.id))[0].stock == 1
+    assert (await get_product(env, p.id)).stock is None  # the product itself has no stock to touch
+
+    await env.tap(BOT, USER, pack("shoc", order.id))
+    assert (await variants_of(env, p.id))[0].stock == 3  # released to the variant
+
+    await env.tap(BOT, USER, pack("sha", p.id, str(v.id)))
+    again = await checkout(env)
+    async with env.app.db.session() as s:
+        (await s.get(Order, again.id)).created_at = utcnow() - timedelta(hours=2)
+        await s.commit()
+    assert (await env.app.shop.gc(force=True))["orders"] == 1
+    assert (await variants_of(env, p.id))[0].stock == 3
+
+
+async def test_paid_variant_order_notifies_when_the_option_runs_out(env):
+    await shop_bot(env)
+    p, vs = await shoe_with_variants(env)
+    v = vs[1]  # stock 2
+    await env.tap(BOT, USER, pack("sha", p.id, str(v.id)))
+    await env.tap(BOT, USER, pack("sha", p.id, str(v.id)))
+    order = await checkout(env)
+    assert order.total == 240000
+    await env.tap(BOT, USER, pack("pay", order.id, "o.manual"))
+    await env.say(BOT, USER, "رسید")
+    pay = await db_one(env, select(Payment))
+    await env.tap(BOT, OWNER, pack("mp", pay.id, "ok"))
+    await env.drain()
+    assert (await last_order(env)).status == "paid"
+    assert has_text(env, BOT, "موجودی «کفش — ۴۳ سفید» تمام شد", OWNER)
+    assert has_text(env, BOT, "کفش — ۴۳ سفید", OWNER)
+
+
+async def test_last_unit_of_a_variant_cannot_be_oversold(env):
+    child = await shop_bot(env)
+    p = await new_product(env, stock=None)
+    async with env.app.db.session() as s:
+        v = ProductVariant(bot_id=BOT, product_id=p.id, label="XL", stock=1)
+        s.add(v)
+        await s.commit()
+    for uid in (USER, USER2):
+        await env.tap(BOT, uid, pack("sha", p.id, str(v.id)))
+    results = await asyncio.gather(
+        *[env.app.shop.create_order(child, uid, name="n", phone="09120000000", address="addr addr addr") for uid in (USER, USER2)],
+        return_exceptions=True,
+    )
+    assert sum(isinstance(r, Order) for r in results) == 1 and sum(isinstance(r, ShopError) for r in results) == 1
+    assert (await variants_of(env, p.id))[0].stock == 0
+
+
+async def test_cart_rows_made_stale_by_the_owner_are_handled(env):
+    child = await shop_bot(env)
+    p = await new_product(env, stock=10)
+    await env.tap(BOT, USER, pack("sha", p.id))  # added as a plain product
+    async with env.app.db.session() as s:  # …then the owner adds options to it
+        s.add(ProductVariant(bot_id=BOT, product_id=p.id, label="L", stock=4))
+        await s.commit()
+    assert await env.app.shop.cart_lines(BOT, USER) == []  # the stale line is hidden
+    try:
+        await env.app.shop.create_order(child, USER, name="n", phone="09120000000", address="addr addr addr")
+        raise AssertionError("expected ShopError")
+    except ShopError:
+        pass
+    assert (await get_product(env, p.id)).stock == 10 and not await db_all(env, select(Order))
+    await env.tap(BOT, USER, pack("shq", p.id, "x"))  # …and the buyer can still remove it
+    assert not await db_all(env, select(CartItem))
+
+
+async def test_deleting_variants_and_products_cleans_up(env):
+    await shop_bot(env)
+    p, vs = await shoe_with_variants(env)
+    await env.tap(BOT, USER, pack("sha", p.id, str(vs[0].id)))
+    await env.tap(BOT, USER2, pack("sha", p.id, str(vs[1].id)))
+    await env.tap(BOT, OWNER, pack("savx", vs[0].id))
+    assert [c.variant_id for c in await db_all(env, select(CartItem))] == [vs[1].id]
+    await env.tap(BOT, OWNER, pack("sapdy", p.id))
+    assert not await variants_of(env, p.id) and not await db_all(env, select(CartItem))
+
+
+async def test_old_cart_table_is_recreated_for_the_new_layout(tmp_path):
+    import sqlite3
+
+    import sqlalchemy as sa
+
+    from botfactory.db import Database
+    from botfactory.db.models import Base
+
+    path = tmp_path / "old.db"
+    eng = sa.create_engine(f"sqlite:///{path}")
+    Base.metadata.create_all(eng)
+    eng.dispose()
+    con = sqlite3.connect(path)
+    con.execute("DROP TABLE cart_items")
+    con.execute("CREATE TABLE cart_items (bot_id BIGINT, user_id BIGINT, product_id INTEGER, qty INTEGER, updated_at DATETIME, PRIMARY KEY (bot_id, user_id, product_id))")
+    con.execute("INSERT INTO cart_items VALUES (1, 2, 3, 1, '2026-01-01 00:00:00')")
+    con.commit()
+    con.close()
+    db = Database(f"sqlite+aiosqlite:///{path}")
+    changed = await db.create_all()
+    assert "cart_items (recreated)" in changed
+    async with db.session() as s:
+        assert (await s.scalar(select(func.count()).select_from(CartItem))) == 0
+        s.add(CartItem(bot_id=1, user_id=2, product_id=3, variant_id=7, qty=1))
+        s.add(CartItem(bot_id=1, user_id=2, product_id=3, variant_id=0, qty=1))  # same product, with/without variant
+        await s.commit()
+    assert await db.create_all() == []
+    await db.dispose()

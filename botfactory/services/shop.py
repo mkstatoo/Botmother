@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy import and_, delete, func, or_, select, update
 
-from ..db.models import CartItem, ChildBot, Content, Order, OrderItem, Payment, Product
+from ..db.models import CartItem, ChildBot, Content, Order, OrderItem, Payment, Product, ProductVariant
 from ..ui import btn, kb
 from ..util import esc, fmt_int, fmt_toman, jdate, utcnow
 
@@ -64,10 +64,25 @@ class Quote:
 class Line:
     product: Product
     qty: int
+    variant: ProductVariant | None = None
+
+    @property
+    def unit_price(self) -> int:
+        if self.variant is not None and self.variant.price_irt:
+            return self.variant.price_irt
+        return self.product.price_irt
+
+    @property
+    def stock(self) -> int | None:
+        return self.variant.stock if self.variant is not None else self.product.stock
+
+    @property
+    def title(self) -> str:
+        return f"{self.product.title} — {self.variant.label}" if self.variant is not None else self.product.title
 
     @property
     def amount(self) -> int:
-        return self.product.price_irt * self.qty
+        return self.unit_price * self.qty
 
 
 def quote(child: ChildBot, lines: list[Line]) -> Quote:
@@ -117,50 +132,87 @@ class ShopService:
         self._last_gc: datetime | None = None
 
     # ------------------------------------------------------------------ cart
+    async def variants_of(self, product_id: int, *, active_only: bool = True) -> list[ProductVariant]:
+        cond = [ProductVariant.product_id == product_id]
+        if active_only:
+            cond.append(ProductVariant.is_active.is_(True))
+        async with self.app.db.session() as s:
+            return list((await s.scalars(select(ProductVariant).where(*cond).order_by(ProductVariant.id))).all())
+
+    async def has_variants(self, product_id: int) -> bool:
+        async with self.app.db.session() as s:
+            return bool(await s.scalar(select(ProductVariant.id).where(ProductVariant.product_id == product_id, ProductVariant.is_active.is_(True)).limit(1)))
+
+    async def _load_lines(self, s, bot_id: int, user_id: int) -> tuple[list[Line], bool]:
+        """(lines, stale) — ``stale`` is True when the cart holds a row that no longer makes sense
+        (variant deleted, or variants were added to a product that was added without one)."""
+        rows = (
+            await s.execute(
+                select(CartItem.qty, CartItem.variant_id, Product, ProductVariant)
+                .join(Product, Product.id == CartItem.product_id)
+                .outerjoin(ProductVariant, and_(ProductVariant.id == CartItem.variant_id, CartItem.variant_id != 0))
+                .where(CartItem.bot_id == bot_id, CartItem.user_id == user_id, Product.bot_id == bot_id)
+                .order_by(CartItem.updated_at)
+            )
+        ).all()
+        pids = {p.id for _, vid, p, _v in rows if not vid}
+        with_variants: set[int] = set()
+        if pids:
+            with_variants = set((await s.scalars(select(ProductVariant.product_id).where(ProductVariant.product_id.in_(pids), ProductVariant.is_active.is_(True)))).all())
+        lines, stale = [], False
+        for qty, vid, p, v in rows:
+            if (vid and v is None) or (not vid and p.id in with_variants):
+                stale = True
+                continue
+            lines.append(Line(p, qty, v))
+        return lines, stale
+
     async def cart_lines(self, bot_id: int, user_id: int) -> list[Line]:
         async with self.app.db.session() as s:
-            rows = (
-                await s.execute(
-                    select(CartItem.qty, Product)
-                    .join(Product, Product.id == CartItem.product_id)
-                    .where(CartItem.bot_id == bot_id, CartItem.user_id == user_id, Product.bot_id == bot_id, Product.is_active.is_(True))
-                    .order_by(CartItem.updated_at)
-                )
-            ).all()
-        return [Line(p, qty) for qty, p in rows]
+            lines, _ = await self._load_lines(s, bot_id, user_id)
+        return [ln for ln in lines if ln.product.is_active and (ln.variant is None or ln.variant.is_active)]
 
     async def cart_count(self, bot_id: int, user_id: int) -> int:
         async with self.app.db.session() as s:
             return int(await s.scalar(select(func.coalesce(func.sum(CartItem.qty), 0)).where(CartItem.bot_id == bot_id, CartItem.user_id == user_id)) or 0)
 
     @staticmethod
-    def _cap(product: Product) -> int:
-        return MAX_QTY if product.stock is None else max(0, min(MAX_QTY, product.stock))
+    def _cap(stock: int | None) -> int:
+        return MAX_QTY if stock is None else max(0, min(MAX_QTY, stock))
 
-    async def change_qty(self, bot_id: int, user_id: int, product_id: int, delta: int) -> str:
-        """delta>0 add, <0 remove one, 0 delete the line. Returns ok|soldout|max|missing."""
+    async def change_qty(self, bot_id: int, user_id: int, product_id: int, delta: int, variant_id: int = 0) -> str:
+        """delta>0 add, <0 remove one, 0 delete the line. Returns ok|soldout|max|missing|choose."""
+        vid = int(variant_id or 0)
         async with self.app.db.session() as s:
+            item = await s.get(CartItem, (bot_id, user_id, product_id, vid))
+            now = utcnow()
+            if delta <= 0:  # removing never needs the product to still exist
+                if item is not None:
+                    new_qty = 0 if delta == 0 else item.qty + delta
+                    if new_qty <= 0:
+                        await s.delete(item)
+                    else:
+                        item.qty, item.updated_at = new_qty, now
+                    await s.commit()
+                return "ok"
             product = await s.get(Product, product_id)
             if product is None or product.bot_id != bot_id or not product.is_active:
                 return "missing"
-            item = await s.get(CartItem, (bot_id, user_id, product_id))
-            now = utcnow()
-            if delta == 0:
-                if item is not None:
-                    await s.delete(item)
-                await s.commit()
-                return "ok"
-            cap = self._cap(product)
+            variant = None
+            if vid:
+                variant = await s.get(ProductVariant, vid)
+                if variant is None or variant.product_id != product_id or variant.bot_id != bot_id or not variant.is_active:
+                    return "missing"
+            elif await s.scalar(select(ProductVariant.id).where(ProductVariant.product_id == product_id, ProductVariant.is_active.is_(True)).limit(1)):
+                return "choose"
+            cap = self._cap(variant.stock if variant is not None else product.stock)
             qty = (item.qty if item else 0) + delta
-            if delta > 0 and cap <= 0:
+            if cap <= 0:
                 return "soldout"
-            if delta > 0 and qty > cap:
+            if qty > cap:
                 return "max"
-            if qty <= 0:
-                if item is not None:
-                    await s.delete(item)
-            elif item is None:
-                s.add(CartItem(bot_id=bot_id, user_id=user_id, product_id=product_id, qty=qty, updated_at=now))
+            if item is None:
+                s.add(CartItem(bot_id=bot_id, user_id=user_id, product_id=product_id, variant_id=vid, qty=qty, updated_at=now))
             else:
                 item.qty, item.updated_at = qty, now
             await s.commit()
@@ -175,31 +227,22 @@ class ShopService:
     async def create_order(self, child: ChildBot, user_id: int, *, name: str, phone: str, address: str) -> Order:
         """Turn the cart into a pending order, reserving stock atomically (all or nothing)."""
         async with self.app.db.session() as s:
-            rows = (
-                await s.execute(
-                    select(CartItem.qty, Product)
-                    .join(Product, Product.id == CartItem.product_id)
-                    .where(CartItem.bot_id == child.id, CartItem.user_id == user_id, Product.bot_id == child.id)
-                    .order_by(CartItem.updated_at)
-                )
-            ).all()
-            lines = [Line(p, qty) for qty, p in rows]
+            lines, stale = await self._load_lines(s, child.id, user_id)
+            if stale:
+                raise ShopError("گزینه‌های بعضی کالاهای سبد تغییر کرده است. سبد خرید را بررسی کنید.")
             if not lines:
                 raise ShopError("سبد خرید شما خالی است.")
             for line in lines:
-                if not line.product.is_active:
-                    raise ShopError(f"«{line.product.title}» دیگر موجود نیست. آن را از سبد حذف کنید.")
+                if not line.product.is_active or (line.variant is not None and not line.variant.is_active):
+                    raise ShopError(f"«{line.title}» دیگر موجود نیست. آن را از سبد حذف کنید.")
+                model, tid = (ProductVariant, line.variant.id) if line.variant is not None else (Product, line.product.id)
                 res = await s.execute(
-                    update(Product)
-                    .where(
-                        Product.id == line.product.id,
-                        Product.is_active.is_(True),
-                        or_(Product.stock.is_(None), Product.stock >= line.qty),
-                    )
-                    .values(stock=Product.stock - line.qty)  # NULL (unlimited) stays NULL
+                    update(model)
+                    .where(model.id == tid, model.is_active.is_(True), or_(model.stock.is_(None), model.stock >= line.qty))
+                    .values(stock=model.stock - line.qty)  # NULL (unlimited) stays NULL
                 )
                 if res.rowcount != 1:
-                    title = line.product.title  # read before rollback expires the instance
+                    title = line.title  # read before rollback expires the instances
                     await s.rollback()
                     raise ShopError(f"موجودی «{title}» کافی نیست. تعداد را کم کنید یا آن را از سبد حذف کنید.")
             q = quote(child, lines)
@@ -217,7 +260,7 @@ class ShopService:
             s.add(order)
             await s.flush()
             for line in lines:
-                s.add(OrderItem(order_id=order.id, product_id=line.product.id, title=line.product.title, unit_price=line.product.price_irt, qty=line.qty))
+                s.add(OrderItem(order_id=order.id, product_id=line.product.id, variant_id=line.variant.id if line.variant is not None else None, title=line.title, unit_price=line.unit_price, qty=line.qty))
             await s.execute(delete(CartItem).where(CartItem.bot_id == child.id, CartItem.user_id == user_id))
             await s.commit()
         return order
@@ -243,7 +286,8 @@ class ShopService:
     async def _restock(self, s, order_id: int) -> None:
         items = (await s.scalars(select(OrderItem).where(OrderItem.order_id == order_id))).all()
         for it in items:
-            await s.execute(update(Product).where(Product.id == it.product_id).values(stock=Product.stock + it.qty))
+            model, tid = (ProductVariant, it.variant_id) if it.variant_id else (Product, it.product_id)
+            await s.execute(update(model).where(model.id == tid).values(stock=model.stock + it.qty))
 
     async def cancel(self, order_id: int, *, allowed: tuple[str, ...] = ("pending",)) -> bool:
         """Cancel and release stock — exactly once (conditional status change)."""
@@ -273,8 +317,9 @@ class ShopService:
         items = (await s.scalars(select(OrderItem).where(OrderItem.order_id == order.id))).all()
         if was == "cancelled":  # the stock was released while the buyer was still paying
             for it in items:
+                model, tid = (ProductVariant, it.variant_id) if it.variant_id else (Product, it.product_id)
                 r = await s.execute(
-                    update(Product).where(Product.id == it.product_id, or_(Product.stock.is_(None), Product.stock >= it.qty)).values(stock=Product.stock - it.qty)
+                    update(model).where(model.id == tid, or_(model.stock.is_(None), model.stock >= it.qty)).values(stock=model.stock - it.qty)
                 )
                 if r.rowcount != 1:
                     await s.execute(update(Order).where(Order.id == order.id).values(flag="oversold"))
@@ -334,11 +379,16 @@ class ShopService:
         except TelegramAPIError as exc:
             log.warning("cannot notify shop owner of bot %s: %s", child.id, exc)
             await self.app.notify_creator(child.owner_id, f"سفارش جدیدی در @{esc(child.username)} ثبت شد؛ داخل خود ربات /start بزنید.")
+        vids = [it.variant_id for it in items if it.variant_id]
+        async with self.app.db.session() as s:
+            variants = {v.id: v for v in (await s.scalars(select(ProductVariant).where(ProductVariant.id.in_(vids)))).all()} if vids else {}
         for it in items:
+            v = variants.get(it.variant_id or 0)
             p = products.get(it.product_id)
-            if p is not None and p.stock is not None and p.stock <= 0:
+            stock = v.stock if v is not None else (p.stock if p is not None and not it.variant_id else None)
+            if stock is not None and stock <= 0:
                 with suppress(TelegramAPIError):
-                    await bot.send_message(child.owner_id, f"📉 موجودی «{esc(p.title)}» تمام شد.")
+                    await bot.send_message(child.owner_id, f"📉 موجودی «{esc(it.title)}» تمام شد.")
 
     # ------------------------------------------------------------------ housekeeping
     async def gc(self, now: datetime | None = None, *, force: bool = False) -> dict[str, int]:

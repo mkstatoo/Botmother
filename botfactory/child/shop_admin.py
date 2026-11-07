@@ -14,12 +14,12 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy import delete, func, select, update
 
 from ..callbacks import A
-from ..db.models import ChildBot, Content, Order, Product, ShopCategory
+from ..db.models import CartItem, ChildBot, Content, Order, Product, ProductVariant, ShopCategory
 from ..services.shop import STATUS_LABEL, order_text, stock_text
 from ..ui import btn, kb, safe_delete, show
 from ..util import esc, fmt_int, fmt_toman, parse_int
 from .common import PAGE, IsOwner, trunc
-from .states import OrderShip, ProductAdd, ProductEdit, ShopCatS, ShopSet
+from .states import OrderShip, ProductAdd, ProductEdit, ShopCatS, ShopSet, VariantAdd, VariantEdit
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..app import App
@@ -125,6 +125,8 @@ async def _product(app: App, child: ChildBot, pid: int) -> Product | None:
 
 
 async def product_view(app: App, child: ChildBot, p: Product):
+    async with app.db.session() as s:
+        vrows = (await s.execute(select(ProductVariant.stock, ProductVariant.is_active).where(ProductVariant.product_id == p.id))).all()
     cat = None
     if p.category_id:
         async with app.db.session() as s:
@@ -134,7 +136,11 @@ async def product_view(app: App, child: ChildBot, p: Product):
         f"🏷 <b>{esc(p.title)}</b>",
         f"وضعیت: {'✅ فعال' if p.is_active else '🚫 غیرفعال'}",
         f"💰 قیمت: {fmt_toman(p.price_irt)}" + (f" (قبل: {fmt_toman(p.compare_price_irt)})" if p.compare_price_irt else ""),
-        f"📦 موجودی: {'نامحدود' if p.stock is None else fmt_int(p.stock)} {stock_text(p.stock)}",
+        (
+            f"🎨 تنوع‌ها: {fmt_int(len(vrows))} گزینه (موجودی هر گزینه جدا حساب می‌شود)"
+            if vrows
+            else f"📦 موجودی: {'نامحدود' if p.stock is None else fmt_int(p.stock)} {stock_text(p.stock)}"
+        ),
         f"🗂 دسته: {esc(cat) if cat else '—'}",
         f"🚚 نیاز به ارسال: {'بله' if p.needs_shipping else 'خیر (دیجیتال)'}" + (" · 📎 فایل متصل است" if p.content_id else ""),
         f"🔥 فروش: {fmt_int(p.sold)}",
@@ -146,7 +152,8 @@ async def product_view(app: App, child: ChildBot, p: Product):
     markup = kb(
         [btn("✏️ نام", "sape", p.id, "title"), btn("✏️ قیمت", "sape", p.id, "price"), btn("✏️ قبل از تخفیف", "sape", p.id, "compare")],
         [btn("✏️ موجودی", "sape", p.id, "stock"), btn("✏️ توضیحات", "sape", p.id, "desc"), btn("🖼 عکس", "sape", p.id, "photo")],
-        [btn("🗂 دسته", "sapcat", p.id), btn("📎 فایل دیجیتال", "sapc", p.id, "0")],
+        [btn("🎨 تنوع (سایز/رنگ)", "sav", p.id), btn("🗂 دسته", "sapcat", p.id)],
+        [btn("📎 فایل دیجیتال", "sapc", p.id, "0")],
         [btn("🚚 ارسال: " + ("فیزیکی" if p.needs_shipping else "دیجیتال"), "sapn", p.id)],
         [btn("🚫 غیرفعال" if p.is_active else "✅ فعال", "sapt", p.id), btn("🗑 حذف", "sapd", p.id), btn("👁 دید مشتری", "shp", p.id)],
         [btn("🔙 کالاها", "sapl", 0)],
@@ -205,10 +212,9 @@ async def cb_product_delete(callback: CallbackQuery, callback_data: A, app: App,
     if p is None:
         await callback.answer("پیدا نشد.", show_alert=True)
         return
-    from ..db.models import CartItem
-
     async with app.db.session() as s:
         await s.execute(delete(CartItem).where(CartItem.bot_id == child.id, CartItem.product_id == p.id))
+        await s.execute(delete(ProductVariant).where(ProductVariant.product_id == p.id, ProductVariant.bot_id == child.id))
         await s.execute(delete(Product).where(Product.id == p.id, Product.bot_id == child.id))
         await s.commit()
     await callback.answer("حذف شد.")
@@ -718,3 +724,207 @@ async def cb_cancel_do(callback: CallbackQuery, callback_data: A, app: App, chil
     assert order is not None
     await show(callback, order_text(order, items, owner=True), _order_markup(order))
     await callback.answer("لغو شد.")
+
+
+# ----------------------------------------------------------------------------- variants (size / colour / …)
+def parse_variant_lines(text: str) -> tuple[list[tuple[str, int | None, int | None]], list[str]]:
+    """Each line: ``label | stock | price`` (stock «-» = unlimited; price optional, «-» = product price)."""
+    rows: list[tuple[str, int | None, int | None]] = []
+    bad: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = [x.strip() for x in line.split("|")]
+        label = parts[0]
+        ok = bool(label) and len(label) <= 100 and len(parts) <= 3 and not label.startswith("/")
+        stock: int | None = None
+        price: int | None = None
+        if ok and len(parts) >= 2:
+            ok, stock = parse_stock(parts[1])
+        if ok and len(parts) == 3 and parts[2] not in ("-", ""):
+            price = parse_int(parts[2])
+            ok = price is not None and 0 < price <= 2_000_000_000
+        if ok:
+            rows.append((label, stock, price))
+        else:
+            bad.append(line)
+    return rows, bad
+
+
+async def _variant(app: App, child: ChildBot, vid: int) -> ProductVariant | None:
+    async with app.db.session() as s:
+        v = await s.get(ProductVariant, vid)
+    return v if v is not None and v.bot_id == child.id else None
+
+
+def _vlabel(v: ProductVariant) -> str:
+    stock = "نامحدود" if v.stock is None else f"{fmt_int(v.stock)} عدد"
+    price = f" · {fmt_toman(v.price_irt)}" if v.price_irt else ""
+    return f"{'✅' if v.is_active else '🚫'} {trunc(v.label, 22)} · {stock}{price}"
+
+
+async def variants_view(app: App, child: ChildBot, p: Product):
+    async with app.db.session() as s:
+        vs = list((await s.scalars(select(ProductVariant).where(ProductVariant.product_id == p.id).order_by(ProductVariant.id))).all())
+    text = (
+        f"🎨 <b>تنوع‌های «{esc(p.title)}»</b>\n\n"
+        "هر گزینه (مثلاً سایز ۴۲ مشکی) موجودی جدا دارد و می‌تواند قیمت متفاوت داشته باشد؛ مشتری هنگام خرید یکی را انتخاب می‌کند.\n"
+        "برای ویرایش روی هر گزینه بزنید."
+        if vs
+        else f"🎨 برای «{esc(p.title)}» هنوز گزینه‌ای تعریف نشده. اگر گزینه‌ای اضافه کنید، موجودی هر گزینه جدا حساب می‌شود."
+    )
+    rows = [[btn(_vlabel(v), "savd", v.id)] for v in vs]
+    rows.append([btn("➕ افزودن گزینه‌ها", "sava", p.id)])
+    rows.append([btn("🔙 کالا", "sap", p.id)])
+    return text, kb(*rows)
+
+
+@router.callback_query(A.filter(F.act == "sav"))
+async def cb_variants(callback: CallbackQuery, callback_data: A, state: FSMContext, app: App, child: ChildBot) -> None:
+    await state.clear()
+    p = await _product(app, child, callback_data.id)
+    if p is None:
+        await callback.answer("پیدا نشد.", show_alert=True)
+        return
+    await show(callback, *await variants_view(app, child, p))
+    await callback.answer()
+
+
+@router.callback_query(A.filter(F.act == "sava"))
+async def cb_variant_add(callback: CallbackQuery, callback_data: A, state: FSMContext, app: App, child: ChildBot) -> None:
+    p = await _product(app, child, callback_data.id)
+    if p is None:
+        await callback.answer("پیدا نشد.", show_alert=True)
+        return
+    await state.set_state(VariantAdd.lines)
+    await state.update_data(pid=p.id)
+    await show(
+        callback,
+        "➕ <b>افزودن گزینه</b>\n\nهر گزینه را در یک خط بنویسید (می‌توانید چند خط را یک‌جا بفرستید):\n"
+        "<code>نام گزینه | موجودی | قیمت</code>\n\n"
+        "• موجودی: عدد، یا «-» برای نامحدود\n"
+        "• قیمت اختیاری است؛ اگر ننویسید قیمت خود کالا اعمال می‌شود\n\n"
+        "مثال:\n<code>۴۲ مشکی | ۵\n۴۳ مشکی | ۳\n۴۳ سفید | ۲ | ۴۹۰۰۰۰</code>",
+        kb([btn("❌ انصراف", "sav", p.id)]),
+    )
+    await callback.answer()
+
+
+@router.message(VariantAdd.lines, F.text)
+async def on_variant_lines(message: Message, state: FSMContext, app: App, child: ChildBot) -> None:
+    pid = int((await state.get_data()).get("pid", 0))
+    p = await _product(app, child, pid)
+    if p is None:
+        await state.clear()
+        return
+    rows, bad = parse_variant_lines(message.text or "")
+    if bad or not rows or len(rows) > 40:
+        msg = "این خط‌ها معتبر نبودند:\n" + "\n".join(f"• {esc(trunc(b, 50))}" for b in bad[:10]) if bad else "حداکثر ۴۰ گزینه در هر بار و حداقل یکی."
+        await message.answer(f"❌ {msg}\n\nقالب: <code>نام | موجودی | قیمت(اختیاری)</code> — دوباره بفرستید.", reply_markup=kb([btn("❌ انصراف", "sav", p.id)]))
+        return
+    async with app.db.session() as s:
+        for label, stock, price in rows:
+            s.add(ProductVariant(bot_id=child.id, product_id=p.id, label=label, stock=stock, price_irt=price))
+        await s.commit()
+    await state.clear()
+    text, markup = await variants_view(app, child, p)
+    await message.answer(f"✅ {fmt_int(len(rows))} گزینه اضافه شد.\n\n" + text, reply_markup=markup)
+
+
+@router.callback_query(A.filter(F.act == "savd"))
+async def cb_variant_detail(callback: CallbackQuery, callback_data: A, state: FSMContext, app: App, child: ChildBot) -> None:
+    await state.clear()
+    v = await _variant(app, child, callback_data.id)
+    if v is None:
+        await callback.answer("پیدا نشد.", show_alert=True)
+        return
+    await show(
+        callback,
+        f"🎨 <b>{esc(v.label)}</b>\nوضعیت: {'✅ فعال' if v.is_active else '🚫 غیرفعال'}\n"
+        f"📦 موجودی: {'نامحدود' if v.stock is None else fmt_int(v.stock)}\n"
+        f"💰 قیمت: {fmt_toman(v.price_irt) if v.price_irt else 'همان قیمت کالا'}",
+        kb(
+            [btn("✏️ نام", "save", v.id, "label"), btn("✏️ موجودی", "save", v.id, "stock"), btn("✏️ قیمت", "save", v.id, "price")],
+            [btn("🚫 غیرفعال" if v.is_active else "✅ فعال", "savt", v.id), btn("🗑 حذف", "savx", v.id)],
+            [btn("🔙 تنوع‌ها", "sav", v.product_id)],
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(A.filter(F.act.in_({"savt", "savx"})))
+async def cb_variant_toggle_delete(callback: CallbackQuery, callback_data: A, app: App, child: ChildBot) -> None:
+    v = await _variant(app, child, callback_data.id)
+    if v is None:
+        await callback.answer("پیدا نشد.", show_alert=True)
+        return
+    async with app.db.session() as s:
+        if callback_data.act == "savt":
+            await s.execute(update(ProductVariant).where(ProductVariant.id == v.id).values(is_active=not v.is_active))
+        else:
+            await s.execute(delete(CartItem).where(CartItem.bot_id == child.id, CartItem.variant_id == v.id))
+            await s.execute(delete(ProductVariant).where(ProductVariant.id == v.id, ProductVariant.bot_id == child.id))
+        await s.commit()
+    await callback.answer("انجام شد.")
+    if callback_data.act == "savt":
+        await cb_variant_detail(callback, A(act="savd", id=v.id), _NoState(), app, child)  # type: ignore[arg-type]
+    else:
+        p = await _product(app, child, v.product_id)
+        if p is not None:
+            await show(callback, *await variants_view(app, child, p))
+
+
+@router.callback_query(A.filter(F.act == "save"))
+async def cb_variant_edit(callback: CallbackQuery, callback_data: A, state: FSMContext, app: App, child: ChildBot) -> None:
+    v = await _variant(app, child, callback_data.id)
+    field = callback_data.p
+    prompts = {
+        "label": "نام جدید گزینه را بنویسید:",
+        "stock": "موجودی را بنویسید (عدد؛ «-» یعنی نامحدود):",
+        "price": "قیمت این گزینه را به تومان بنویسید («-» یعنی همان قیمت کالا):",
+    }
+    if v is None or field not in prompts:
+        await callback.answer("پیدا نشد.", show_alert=True)
+        return
+    await state.set_state(VariantEdit.value)
+    await state.update_data(vid=v.id, field=field)
+    await show(callback, "✏️ " + prompts[field], kb([btn("❌ انصراف", "savd", v.id)]))
+    await callback.answer()
+
+
+@router.message(VariantEdit.value, F.text)
+async def on_variant_edit(message: Message, state: FSMContext, app: App, child: ChildBot) -> None:
+    d = await state.get_data()
+    v = await _variant(app, child, int(d.get("vid", 0)))
+    field = d.get("field", "")
+    raw = (message.text or "").strip()
+    if v is None:
+        await state.clear()
+        return
+    values: dict[str, object]
+    if field == "label":
+        if not raw or len(raw) > 100 or raw.startswith("/"):
+            await message.answer("نام معتبر بنویسید (حداکثر ۱۰۰ حرف).")
+            return
+        values = {"label": raw}
+    elif field == "stock":
+        ok, stock = parse_stock(raw)
+        if not ok:
+            await message.answer("یک عدد بنویسید یا «-» برای نامحدود.")
+            return
+        values = {"stock": stock}
+    elif field == "price":
+        price = None if raw == "-" else parse_int(raw)
+        if raw != "-" and (not price or price > 2_000_000_000):
+            await message.answer("قیمت را به تومان (عدد) بنویسید یا «-».")
+            return
+        values = {"price_irt": price}
+    else:
+        await state.clear()
+        return
+    async with app.db.session() as s:
+        await s.execute(update(ProductVariant).where(ProductVariant.id == v.id, ProductVariant.bot_id == child.id).values(**values))
+        await s.commit()
+    await state.clear()
+    await message.answer("✅ ذخیره شد.", reply_markup=kb([btn("🎨 گزینه", "savd", v.id)], [btn("🔙 تنوع‌ها", "sav", v.product_id)]))

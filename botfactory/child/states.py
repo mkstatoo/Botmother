@@ -84,3 +84,11 @@ class ShopSet(StatesGroup):
 
 class OrderShip(StatesGroup):
     tracking = State()
+
+
+class VariantAdd(StatesGroup):
+    lines = State()
+
+
+class VariantEdit(StatesGroup):
+    value = State()
