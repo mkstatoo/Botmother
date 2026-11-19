@@ -30,6 +30,7 @@ from .mother import build_mother_dispatcher
 from .polling import poll_forever
 from .services.billing import Billing
 from .services.cleanup import cleanup_loop
+from .services.mainchannel import MainChannel
 from .services.payments import PaymentService
 from .services.shop import ShopService
 
@@ -61,6 +62,7 @@ class App:
         self.payments = PaymentService(self)
         self.billing = Billing(self)
         self.shop = ShopService(self)
+        self.mainchan = MainChannel(self)
         self.mother_dp = build_mother_dispatcher(self)
         self.child_dp = build_child_dispatcher(self)
 

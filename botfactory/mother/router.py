@@ -30,6 +30,7 @@ from aiogram.types import (
 from sqlalchemy import func, select, update
 
 from ..callbacks import A
+from ..gate import enforce
 from ..db.models import BotUser, ChildBot, Content, Creator, Delivery
 from ..services.botops import bot_counts, purge_bot
 from ..ui import btn, kb, safe_delete, show, url_btn
@@ -82,9 +83,12 @@ class CreatorMiddleware(BaseMiddleware):
             await s.commit()
         if creator.is_banned:
             return None
+        is_admin = user.id in self.app.settings.admin_ids
+        if not is_admin and self.app.mother_bot is not None and not await enforce(self.app, event, data["bot"], user.id, "creators"):
+            return None
         data["app"] = self.app
         data["creator"] = creator
-        data["is_admin"] = user.id in self.app.settings.admin_ids
+        data["is_admin"] = is_admin
         return await handler(event, data)
 
 
@@ -461,7 +465,7 @@ async def _admin_home(app: App):
         [btn("👤 سازندگان", "admc", 0), btn("🔎 جستجو", "admq")],
         [btn("🤖 لیست ربات‌ها", "adml", 0)],
         [btn(f"🧾 رسیدهای در انتظار{review}", "admrv"), btn("💰 پرداخت‌ها", "admpay")],
-        [btn("⚙️ تنظیمات اشتراک", "admset")],
+        [btn("⚙️ تنظیمات اشتراک", "admset"), btn("📢 کانال اصلی", "admmc")],
         [btn("📣 پیام به سازندگان", "admbc")],
         [btn("🔙 بازگشت", "home")],
     )

@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Update
 
 from ..db.models import BotUser, ChildBot
+from ..gate import enforce
 from ..util import utcnow
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -63,6 +64,9 @@ class ChildContext(BaseMiddleware):
             return None
         if child.status != "active" and not is_owner:
             await self._unavailable(event, bot, user.id)
+            return None
+
+        if not await enforce(self.app, event, bot, user.id, "children"):
             return None
 
         data.update(app=self.app, child=child, bot_user=bu, is_owner=is_owner)
