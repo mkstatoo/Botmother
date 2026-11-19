@@ -32,14 +32,14 @@ router = Router(name="child_admin_content")
 router.message.filter(F.chat.type == ChatType.PRIVATE, IsOwner())
 router.callback_query.filter(F.message.chat.type == ChatType.PRIVATE, IsOwner())
 
-MEDIA = F.audio | F.video | F.voice | F.document | F.video_note
+MEDIA = F.audio | F.video | F.voice | F.document | F.video_note | F.photo | F.animation
 CANCEL_ROW = [btn("❌ انصراف", "ucancel")]
 
 
 # ----------------------------------------------------------------------------- panel
 PANEL_TEXT = (
     "⚙️ <b>پنل مدیریت</b> @{username}\n\n"
-    "💡 برای ثبت محتوا کافی است هر <b>فایل صوتی، ویدئو، ویس یا فایل</b> را همین‌جا برای ربات بفرستید."
+    "💡 برای ثبت محتوا کافی است هر <b>فایل صوتی، ویدئو، ویس، عکس، گیف یا فایل</b> را همین‌جا برای ربات بفرستید."
 )
 
 
@@ -77,6 +77,12 @@ def _strip_ext(name: str | None) -> str:
 
 def extract_media(m: Message) -> dict[str, Any] | None:
     caption = (m.caption or "").strip().split("\n")[0]
+    if m.animation:  # a GIF also carries `document`, so it must be checked first
+        g = m.animation
+        return dict(kind="animation", file_id=g.file_id, file_unique_id=g.file_unique_id, duration=g.duration, file_size=g.file_size, default_title=_strip_ext(g.file_name) or caption)
+    if m.photo:
+        ph = max(m.photo, key=lambda x: (x.file_size or 0, x.width * x.height))  # largest size
+        return dict(kind="photo", file_id=ph.file_id, file_unique_id=ph.file_unique_id, duration=None, file_size=ph.file_size, default_title=caption)
     if m.audio:
         a = m.audio
         title = a.title or _strip_ext(a.file_name)
@@ -111,7 +117,7 @@ async def cb_add(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(Upload.file)
     await show(
         callback,
-        "📤 فایل صوتی / ویدئو / ویس / فایل را بفرستید.\n\n"
+        "📤 فایل صوتی / ویدئو / ویس / عکس / گیف / فایل را بفرستید.\n\n"
         "ℹ️ می‌توانید فایل را مستقیم از جای دیگر فوروارد هم کنید.",
         kb(CANCEL_ROW),
     )

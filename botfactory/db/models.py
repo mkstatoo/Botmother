@@ -162,7 +162,7 @@ class Content(Base):
     bot_id: Mapped[int] = mapped_column(BigInteger, index=True)
     title: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # audio | video | voice | document | video_note | link
+    # audio | video | voice | document | video_note | photo | animation | link
     kind: Mapped[str] = mapped_column(String(16))
     # telegram | channel | external
     storage: Mapped[str] = mapped_column(String(16), default="telegram")

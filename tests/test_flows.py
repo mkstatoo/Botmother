@@ -785,3 +785,47 @@ async def test_creator_registered_on_first_contact(env):
     await env.say(MOTHER_ID, 888, "/start")
     async with env.app.db.session() as s:
         assert (await s.get(Creator, 888)) is not None
+
+
+# ------------------------------------------------------------------------------ photo & GIF content
+async def _upload_extra(env, update, **expect):
+    await env.feed(BOT, update)
+    assert has_text(env, BOT, expect["label"], OWNER)  # "received" notice names the type
+    await env.tap(BOT, OWNER, pack("utitle")) if expect.get("default") else await env.say(BOT, OWNER, "عنوان")
+    await env.tap(BOT, OWNER, pack("udesc"))
+    await env.tap(BOT, OWNER, pack("uacc", p="free"))
+    return await db_one(env, select(func.max(Content.id)))
+
+
+async def test_photo_and_gif_content_upload_and_delivery(env):
+    await env.make_child(BOT, owner=OWNER)
+    sizes = [
+        {"file_id": "PH-S", "file_unique_id": "u-s", "width": 90, "height": 60, "file_size": 2_000},
+        {"file_id": "PH-L", "file_unique_id": "u-l", "width": 1280, "height": 853, "file_size": 150_000},
+    ]
+    pid = await _upload_extra(env, msg_update(OWNER, None, photo=sizes, caption="غروب"), label="عکس", default=True)
+    gif = {"file_id": "GIF1", "file_unique_id": "u-g", "width": 320, "height": 240, "duration": 3, "file_size": 90_000, "file_name": "dance.mp4"}
+    # Telegram sends a GIF with BOTH `animation` and `document`
+    gid = await _upload_extra(env, msg_update(OWNER, None, animation=gif, document={**gif, "mime_type": "video/mp4"}), label="گیف", default=True)
+
+    async with env.app.db.session() as s:
+        ph, gf = await s.get(Content, pid), await s.get(Content, gid)
+    assert (ph.kind, ph.file_id, ph.file_size, ph.title) == ("photo", "PH-L", 150_000, "غروب")  # largest size kept
+    assert (gf.kind, gf.file_id, gf.duration, gf.title) == ("animation", "GIF1", 3, "dance")  # not mistaken for a document
+
+    env.fake.clear()
+    await env.say(BOT, USER, f"/start c_{pid}")
+    assert env.fake.find("SendPhoto", BOT, chat_id=USER, photo="PH-L")
+    await env.say(BOT, USER, f"/start c_{gid}")
+    assert env.fake.find("SendAnimation", BOT, chat_id=USER, animation="GIF1")
+    assert "🖼" in env.fake.last("SendPhoto", BOT).data["caption"]
+
+    # shown in the owner's list with the right label
+    await env.tap(BOT, OWNER, pack("cd", pid, "0"))
+    assert has_text(env, BOT, "عکس", OWNER)
+
+
+async def test_photo_from_a_stranger_is_still_ignored(env):
+    await env.make_child(BOT, owner=OWNER)
+    await env.feed(BOT, msg_update(USER, None, photo=[{"file_id": "X", "file_unique_id": "x", "width": 1, "height": 1}]))
+    assert await db_one(env, select(func.count()).select_from(Content)) == 0

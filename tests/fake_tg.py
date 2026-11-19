@@ -24,7 +24,7 @@ from aiogram.types import (
 )
 
 SEND_METHODS = {
-    "SendMessage", "SendAudio", "SendVideo", "SendVoice", "SendDocument", "SendVideoNote", "SendPhoto",
+    "SendMessage", "SendAudio", "SendVideo", "SendVoice", "SendDocument", "SendVideoNote", "SendPhoto", "SendAnimation",
 }
 
 

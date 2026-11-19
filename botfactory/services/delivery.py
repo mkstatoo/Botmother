@@ -24,6 +24,8 @@ KIND_ICON = {
     "voice": "🎙",
     "document": "📄",
     "video_note": "⭕️",
+    "photo": "🖼",
+    "animation": "🎞",
     "link": "🔗",
 }
 KIND_LABEL = {
@@ -32,6 +34,8 @@ KIND_LABEL = {
     "voice": "ویس",
     "document": "فایل",
     "video_note": "ویدئو پیام",
+    "photo": "عکس",
+    "animation": "گیف",
     "link": "لینک",
 }
 
@@ -104,6 +108,10 @@ async def send_content(bot: Bot, child: ChildBot, content: Content, chat_id: int
             )
         elif content.kind == "voice":
             msg = await bot.send_voice(chat_id, fid, caption=caption, protect_content=protect, duration=content.duration)
+        elif content.kind == "photo":
+            msg = await bot.send_photo(chat_id, fid, caption=caption, protect_content=protect)
+        elif content.kind == "animation":
+            msg = await bot.send_animation(chat_id, fid, caption=caption, protect_content=protect, duration=content.duration)
         elif content.kind == "video_note":
             first = await bot.send_video_note(chat_id, fid, protect_content=protect)
             second = await bot.send_message(chat_id, caption, protect_content=protect)
