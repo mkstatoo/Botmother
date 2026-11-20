@@ -27,7 +27,7 @@ def test_summary_percentiles_and_window():
 def test_verdict_names_the_cause():
     assert "مسیر شبکه" in verdict(2.0, 50, 0, 0.1, 5000)[0]
     assert verdict(0.2, 50, 0, 0.1, 5000)[0].startswith("🟢")
-    assert any("ناپایدار" in v for v in verdict(0.2, 50, 30, 0.1, 5000))
+    assert any("ناپایدار" in v for v in verdict(0.2, 50, 8, 0.1, 5000))
     assert any("پردازنده" in v for v in verdict(0.2, 50, 0, 2.0, 5000))
     assert any("حافظه" in v for v in verdict(0.2, 50, 0, 0.1, 100))
     assert verdict(0.2, 1, 0, None, None)[0].startswith("ℹ️")  # not enough data yet

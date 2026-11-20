@@ -43,10 +43,10 @@ def verdict(api_p50: float, api_n: int, poll_errors: int, load_ratio: float | No
     total = api_n + api_failed
     if total >= 5 and api_failed / total > 0.15:
         out.insert(0, f"🔴 {api_failed / total * 100:.0f}٪ درخواست‌ها به تلگرام ناموفق بوده‌اند؛ اتصال گاهی کاملاً می‌ایستد (حتی اگر سرعتِ بقیه خوب باشد).")
-    if poll_errors > 10:
-        out.append(f"🔴 {fmt_int(poll_errors)} خطای اتصال در یک ساعت اخیر؛ پروکسی ناپایدار است (واچ‌داگ باید سرور را عوض کند).")
-    elif poll_errors > 2:
-        out.append(f"🟡 {fmt_int(poll_errors)} خطای اتصال در یک ساعت اخیر.")
+    if poll_errors > 4:
+        out.append(f"🔴 {fmt_int(poll_errors)} خطای اتصال در ۱۵ دقیقهٔ اخیر؛ پروکسی هنوز ناپایدار است.")
+    elif poll_errors > 1:
+        out.append(f"🟡 {fmt_int(poll_errors)} خطای اتصال در ۱۵ دقیقهٔ اخیر.")
     if load_ratio is not None and load_ratio > 1.0:
         out.append("🔴 پردازنده سرور شلوغ است (load بیشتر از تعداد هسته).")
     if mem_avail is not None and mem_avail < 200:
@@ -57,10 +57,11 @@ def verdict(api_p50: float, api_n: int, poll_errors: int, load_ratio: float | No
 def view(app: App, probe: list[float] | None = None, probe_err: str | None = None):
     api, upd = app.metrics.api_summary(), app.metrics.update_summary()
     poll_err = app.metrics.poll_errors()
+    poll_err_now = app.metrics.poll_errors(900.0)
     sysi = system_snapshot()
     load_ratio = (sysi["load1"] / sysi["cpus"]) if sysi["load1"] is not None else None
     lines = ["🩺 <b>سلامت سرویس</b> (ساعت اخیر؛ بعد از هر ری‌استارت از صفر شروع می‌شود)\n"]
-    lines += verdict(api.p50, api.n, poll_err, load_ratio, sysi["mem_avail_mb"], api.errors)
+    lines += verdict(api.p50, api.n, poll_err_now, load_ratio, sysi["mem_avail_mb"], api.errors)
     lines.append("")
     lines.append("<b>درخواست‌های ربات‌ها به تلگرام</b>")
     if api.n:
@@ -69,7 +70,7 @@ def view(app: App, probe: list[float] | None = None, probe_err: str | None = Non
         lines.append("هنوز موردی ثبت نشده.")
     if api.errors:
         lines.append(f"ناموفق: {fmt_int(api.errors)}")
-    lines.append(f"خطای اتصال دریافت پیام‌ها: {fmt_int(poll_err)}")
+    lines.append(f"خطای اتصال دریافت پیام‌ها: {fmt_int(poll_err_now)} در ۱۵ دقیقهٔ اخیر · {fmt_int(poll_err)} در ساعت اخیر")
     lines.append("")
     lines.append("<b>پردازش هر پیام/کلیک (از دریافت تا تمام شدن پاسخ)</b>")
     if upd.n:
