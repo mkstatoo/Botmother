@@ -187,3 +187,14 @@ def test_without_saved_link_it_only_restarts_xray(tmp_path, web):
 def test_installer_scripts_are_valid_bash():
     for name in ("xray-watchdog.sh", "05-watchdog.sh"):
         assert subprocess.run(["bash", "-n", str(ROOT / "deploy" / "debian" / name)], check=False).returncode == 0  # noqa: S603, S607
+
+
+def test_outage_builds_a_pool_of_the_fastest_servers(tmp_path, web):
+    rig = make_rig(tmp_path, web)
+    rig.run()
+    r = rig.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    cfg = rig.server_in_config()
+    assert '"balancers"' in cfg and '"observatory"' in cfg  # pool, not a single server
+    assert "ok-60.example" in cfg and "ok-200.example" in cfg and "dead.example" not in cfg
+    assert rig.notify_log.exists() and "chat_id=11" in rig.notify_log.read_text()  # admins were told

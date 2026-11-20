@@ -66,7 +66,22 @@ repick() {
   log "آزمایش تأخیر همه‌ی سرورها…"
   local RANK; RANK="$(xl --bench --test-url "$CHECK_URL" < "$LINK_FILE" || true)"
   if [ -z "$RANK" ]; then log "هیچ سروری از این شبکه به تلگرام نرسید."; return 1; fi
-  local N MS DESC
+  local N MS DESC POOL
+  POOL="$(printf '%s\n' "$RANK" | head -n "${XRAY_POOL:-4}" | cut -f1 | paste -sd, -)"
+  if [[ "$POOL" == *,* ]]; then
+    MS="$(printf '%s\n' "$RANK" | head -n 1 | cut -f2)"
+    if xl --pick "$POOL" > "$CFG_DIR/config.new.json" < /dev/null && "$BIN" run -test -c "$CFG_DIR/config.new.json" > /dev/null 2>&1; then
+      mv "$CFG_DIR/config.new.json" "$CFG_DIR/config.json"
+      chown root:nogroup "$CFG_DIR/config.json" 2>/dev/null || true
+      chmod 640 "$CFG_DIR/config.json"
+      systemctl restart xray || true
+      if wait_port && check; then
+        log "استخر سرورها ($POOL) فعال شد."
+        echo "$POOL|$MS" > "$STATE/last_server"
+        return 0
+      fi
+    fi
+  fi
   while IFS=$'\t' read -r N MS DESC; do
     xl --pick "$N" > "$CFG_DIR/config.new.json" < /dev/null || continue
     "$BIN" run -test -c "$CFG_DIR/config.new.json" > /dev/null 2>&1 || continue

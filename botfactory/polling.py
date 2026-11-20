@@ -39,7 +39,7 @@ async def poll_forever(
     dp: Dispatcher,
     *,
     on_unauthorized: Callable[[], Awaitable[None]] | None = None,
-    poll_timeout: int = 30,
+    poll_timeout: int = 20,
 ) -> None:
     allowed = dp.resolve_used_update_types()
     offset: int | None = None
@@ -63,7 +63,7 @@ async def poll_forever(
                     offset=offset,
                     timeout=poll_timeout,
                     allowed_updates=allowed,
-                    request_timeout=poll_timeout + 15,
+                    request_timeout=poll_timeout + 10,
                 )
                 backoff = 1.0
             except asyncio.CancelledError:

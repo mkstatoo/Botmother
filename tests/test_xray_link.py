@@ -286,3 +286,41 @@ def test_resolve_links_splits_several_pasted_links():
     assert xl.resolve_links(f"{a}\n{b}\n") == [a, b]
     assert xl.resolve_links(f"{a} {b}") == [a, b]
     assert xl.resolve_links(a) == [a]
+
+
+# ------------------------------------------------------------------ server pool (auto-failover inside Xray)
+def test_single_link_config_is_unchanged():
+    cfg = xl.build_config(L1)
+    assert cfg["outbounds"][0]["tag"] == "proxy" and "observatory" not in cfg
+    assert cfg["routing"]["rules"][0]["outboundTag"] == "proxy"
+
+
+def test_pool_config_probes_all_servers_and_balances_by_ping():
+    cfg = xl.build_config([L1, L2])
+    tags = [o["tag"] for o in cfg["outbounds"]]
+    assert tags == ["proxy-1", "proxy-2", "direct"]
+    assert cfg["observatory"]["subjectSelector"] == ["proxy-"] and cfg["observatory"]["probeUrl"].startswith("https://api.telegram.org")
+    bal = cfg["routing"]["balancers"][0]
+    assert bal["strategy"]["type"] == "leastPing" and bal["fallbackTag"] == "proxy-1"
+    rule = cfg["routing"]["rules"][0]
+    assert rule["balancerTag"] == "pool" and "outboundTag" not in rule  # inbound traffic goes to the pool, never "direct"
+    with pytest.raises(LinkError):
+        xl.build_config([])
+    with pytest.raises(LinkError):
+        xl.build_config([L1] * (xl.MAX_POOL + 1))
+
+
+def test_parse_pick():
+    assert xl.parse_pick("3", 5) == [3]
+    assert xl.parse_pick("3,1,2", 5) == [3, 1, 2]
+    for bad in ("", "0", "6", "1,1", "a", "1,2,3,4,5,6,7"):
+        with pytest.raises(LinkError):
+            xl.parse_pick(bad, 5 if bad != "1,2,3,4,5,6,7" else 9)
+
+
+def test_cli_pick_several(monkeypatch, capsys):
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(f"{L1}\n{L2}\n"))
+    assert xl.main(["--pick", "2,1"]) == 0
+    cfg = json.loads(capsys.readouterr().out)
+    assert [o["tag"] for o in cfg["outbounds"][:2]] == ["proxy-1", "proxy-2"]
+    assert cfg["outbounds"][0]["protocol"] == json.loads(json.dumps(xl.parse_link(L2)))["protocol"]

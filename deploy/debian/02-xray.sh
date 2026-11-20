@@ -107,10 +107,18 @@ if [ "$ANS" = "a" ] || [ "$ANS" = "A" ]; then
   else
     echo "سریع‌ترین‌ها (شماره | میلی‌ثانیه | مشخصات):"
     printf '%s\n' "$RANK" | head -5
-    while IFS=$'\t' read -r N MS _; do
-      echo "▶ امتحان نهایی سرور $N (${MS}ms)…"
-      if try_pick "$N"; then OK=1; break; fi
-    done <<< "$RANK"
+    POOL_SIZE="${XRAY_POOL:-4}"
+    POOL="$(printf '%s\n' "$RANK" | head -n "$POOL_SIZE" | cut -f1 | paste -sd, -)"
+    if [[ "$POOL" == *,* ]]; then
+      echo "▶ ساخت استخر خودکار از سریع‌ترین‌ها ($POOL)؛ مسیر هر لحظه روی بهترین سرورِ سالم می‌رود…"
+      if try_pick "$POOL"; then OK=1; N="$POOL"; fi
+    fi
+    if [ "$OK" != 1 ]; then
+      while IFS=$'\t' read -r N MS _; do
+        echo "▶ امتحان نهایی سرور $N (${MS}ms)…"
+        if try_pick "$N"; then OK=1; break; fi
+      done <<< "$RANK"
+    fi
   fi
 else
   [[ "$ANS" =~ ^[0-9]+$ ]] || { echo "شماره معتبر نیست." >&2; exit 1; }

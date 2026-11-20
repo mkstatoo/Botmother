@@ -282,9 +282,19 @@ def parse_link(link: str) -> dict[str, Any]:
         raise LinkError("لینک ناقص یا نامعتبر است (آدرس، پورت یا پارامترها را بررسی کنید).") from exc
 
 
-def build_config(link: str, socks_port: int = SOCKS_PORT, http_port: int | None = HTTP_PORT) -> dict[str, Any]:
-    outbound = parse_link(link)
-    outbound["tag"] = "proxy"
+PROBE_URL = "https://api.telegram.org/"
+MAX_POOL = 6
+
+
+def build_config(link: str | list[str], socks_port: int = SOCKS_PORT, http_port: int | None = HTTP_PORT) -> dict[str, Any]:
+    """One link → a plain proxy. Several links → a pool: Xray probes every server and always uses the
+    fastest alive one, so a stalled upstream is dropped within seconds instead of freezing the bots."""
+    links = [link] if isinstance(link, str) else list(link)
+    if not links:
+        raise LinkError("حداقل یک سرور لازم است.")
+    if len(links) > MAX_POOL:
+        raise LinkError(f"حداکثر {MAX_POOL} سرور برای استخر مجاز است.")
+    outbounds = [parse_link(x) for x in links]
     inbounds: list[dict[str, Any]] = [
         {
             "tag": "socks-in",
@@ -298,12 +308,37 @@ def build_config(link: str, socks_port: int = SOCKS_PORT, http_port: int | None 
     if http_port is not None:
         inbounds.append({"tag": "http-in", "listen": "127.0.0.1", "port": http_port, "protocol": "http", "settings": {}})
         tags.append("http-in")
-    return {
-        "log": {"loglevel": "warning"},
-        "inbounds": inbounds,
-        "outbounds": [outbound, {"tag": "direct", "protocol": "freedom"}],
-        "routing": {"domainStrategy": "AsIs", "rules": [{"type": "field", "inboundTag": tags, "outboundTag": "proxy"}]},
+    config: dict[str, Any] = {"log": {"loglevel": "warning"}, "inbounds": inbounds}
+    if len(outbounds) == 1:
+        outbounds[0]["tag"] = "proxy"
+        config["outbounds"] = [outbounds[0], {"tag": "direct", "protocol": "freedom"}]
+        config["routing"] = {"domainStrategy": "AsIs", "rules": [{"type": "field", "inboundTag": tags, "outboundTag": "proxy"}]}
+        return config
+    for i, ob in enumerate(outbounds, 1):
+        ob["tag"] = f"proxy-{i}"
+    config["outbounds"] = outbounds + [{"tag": "direct", "protocol": "freedom"}]
+    config["observatory"] = {"subjectSelector": ["proxy-"], "probeUrl": PROBE_URL, "probeInterval": "10s"}
+    config["routing"] = {
+        "domainStrategy": "AsIs",
+        "balancers": [{"tag": "pool", "selector": ["proxy-"], "strategy": {"type": "leastPing"}, "fallbackTag": "proxy-1"}],
+        "rules": [{"type": "field", "inboundTag": tags, "balancerTag": "pool"}],
     }
+    return config
+
+
+def parse_pick(text: str, total: int) -> list[int]:
+    """'3' or '3,7,12' → 1-based server numbers (validated, unique, order kept)."""
+    try:
+        nums = [int(x) for x in str(text).split(",") if x.strip()]
+    except ValueError as exc:
+        raise LinkError("شماره‌ی سرور باید عدد باشد (یا چند عدد با ویرگول).") from exc
+    if not nums or len(set(nums)) != len(nums):
+        raise LinkError("شماره‌ها خالی یا تکراری است.")
+    if len(nums) > MAX_POOL:
+        raise LinkError(f"حداکثر {MAX_POOL} سرور برای استخر مجاز است.")
+    if any(not 1 <= n <= total for n in nums):
+        raise LinkError(f"شماره باید بین ۱ و {total} باشد.")
+    return nums
 
 
 SUPPORTED_SCHEMES = ("vless://", "vmess://", "trojan://", "ss://")
@@ -459,7 +494,7 @@ def _load_links(args: argparse.Namespace) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="botfactory.xray_link", add_help=True)
     ap.add_argument("--list", action="store_true", help="فهرست سرورها (بدون اطلاعات محرمانه)")
-    ap.add_argument("--pick", type=int, default=1, help="ساخت تنظیمات برای سرور شماره N")
+    ap.add_argument("--pick", default="1", help="ساخت تنظیمات برای سرور شماره N، یا چند سرور با ویرگول (مثل 3,7,12) برای انتخاب خودکار سریع‌ترین")
     ap.add_argument("--links-file", help="فایل کش لینک‌ها (دسترسی ۶۰۰)؛ اگر نبود از stdin ساخته می‌شود")
     ap.add_argument("--bench", action="store_true", help="همه‌ی سرورها را امتحان و بر اساس تأخیر مرتب کن")
     ap.add_argument("--xray", default="/usr/local/bin/xray")
@@ -482,9 +517,8 @@ def main(argv: list[str] | None = None) -> int:
             if not ranked:
                 raise LinkError("هیچ‌کدام از سرورها از این شبکه به مقصد نرسید.")
             return 0
-        if not 1 <= args.pick <= len(links):
-            raise LinkError(f"شماره باید بین ۱ و {len(links)} باشد.")
-        config = build_config(links[args.pick - 1])
+        picked = parse_pick(args.pick, len(links))
+        config = build_config([links[n - 1] for n in picked] if len(picked) > 1 else links[picked[0] - 1])
     except LinkError as exc:
         print(f"خطا: {exc}", file=sys.stderr)
         return 1

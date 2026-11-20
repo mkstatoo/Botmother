@@ -28,7 +28,7 @@ def _s(x: float) -> str:
     return f"{x * 1000:,.0f} ms" if x < 1 else f"{x:.1f} s"
 
 
-def verdict(api_p50: float, api_n: int, poll_errors: int, load_ratio: float | None, mem_avail: float | None) -> list[str]:
+def verdict(api_p50: float, api_n: int, poll_errors: int, load_ratio: float | None, mem_avail: float | None, api_failed: int = 0) -> list[str]:
     """Plain-language findings, most important first."""
     out: list[str] = []
     if api_n >= 5:
@@ -40,6 +40,9 @@ def verdict(api_p50: float, api_n: int, poll_errors: int, load_ratio: float | No
             out.append("🟢 تأخیر مسیر تلگرام خوب است.")
     else:
         out.append("ℹ️ هنوز تعداد کافی درخواست ثبت نشده؛ چند بار ربات را امتحان کنید و دوباره بزنید.")
+    total = api_n + api_failed
+    if total >= 5 and api_failed / total > 0.15:
+        out.insert(0, f"🔴 {api_failed / total * 100:.0f}٪ درخواست‌ها به تلگرام ناموفق بوده‌اند؛ اتصال گاهی کاملاً می‌ایستد (حتی اگر سرعتِ بقیه خوب باشد).")
     if poll_errors > 10:
         out.append(f"🔴 {fmt_int(poll_errors)} خطای اتصال در یک ساعت اخیر؛ پروکسی ناپایدار است (واچ‌داگ باید سرور را عوض کند).")
     elif poll_errors > 2:
@@ -57,7 +60,7 @@ def view(app: App, probe: list[float] | None = None, probe_err: str | None = Non
     sysi = system_snapshot()
     load_ratio = (sysi["load1"] / sysi["cpus"]) if sysi["load1"] is not None else None
     lines = ["🩺 <b>سلامت سرویس</b> (ساعت اخیر؛ بعد از هر ری‌استارت از صفر شروع می‌شود)\n"]
-    lines += verdict(api.p50, api.n, poll_err, load_ratio, sysi["mem_avail_mb"])
+    lines += verdict(api.p50, api.n, poll_err, load_ratio, sysi["mem_avail_mb"], api.errors)
     lines.append("")
     lines.append("<b>درخواست‌های ربات‌ها به تلگرام</b>")
     if api.n:
