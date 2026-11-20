@@ -31,7 +31,7 @@ from .polling import poll_forever
 from .services.billing import Billing
 from .services.cleanup import cleanup_loop
 from .services.mainchannel import MainChannel
-from .services.metrics import ApiTimer, Metrics
+from .services.metrics import ApiTimer, Metrics, NetRetry
 from .services.payments import PaymentService
 from .services.shop import ShopService
 
@@ -82,7 +82,12 @@ class App:
 
     def make_bot(self, token: str) -> Bot:
         session = self.session_factory()
+        session.middleware(NetRetry())  # outer: retries; inner timer records every attempt
         session.middleware(ApiTimer(self.metrics))
+        session.timeout = 20  # a call that hangs longer is a dead connection, not a slow answer
+        init = getattr(session, "_connector_init", None)
+        if isinstance(init, dict):
+            init["keepalive_timeout"] = 10  # drop idle sockets before the proxy/upstream silently kills them
         return Bot(token, session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
     # ------------------------------------------------------------------ helpers

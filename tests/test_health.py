@@ -58,3 +58,64 @@ async def test_slow_updates_are_logged(env, caplog, monkeypatch):
     with caplog.at_level(logging.WARNING):
         await env.say(BOT, USER, "/start")
     assert any("slow update" in r.message for r in caplog.records)
+
+
+# ------------------------------------------------------------------------------ network resilience
+async def test_dead_connection_is_retried_instead_of_failing_the_click(env, monkeypatch):
+    from aiogram.exceptions import TelegramNetworkError
+
+    from botfactory.services import metrics as mod
+
+    monkeypatch.setattr(mod, "RETRY_PAUSE", 0.0)
+    await env.make_child(BOT, owner=500)
+    state = {"n": 0}
+
+    def flaky(call):
+        state["n"] += 1
+        if state["n"] <= 2:  # two stale sockets in a row
+            return TelegramNetworkError(method=None, message="HTTP Client says - ServerDisconnectedError: Server disconnected")  # type: ignore[arg-type]
+
+    env.fake.fail["SendMessage"] = flaky
+    env.fake.clear()
+    await env.say(BOT, USER, "/start")
+    assert state["n"] == 3  # 2 failures + 1 success
+    assert env.app.metrics.api_summary().errors >= 2  # every attempt is visible in the health screen
+
+
+async def test_send_that_timed_out_is_not_repeated_but_an_edit_is(env, monkeypatch):
+    from aiogram.exceptions import TelegramNetworkError
+
+    from botfactory.services import metrics as mod
+
+    monkeypatch.setattr(mod, "RETRY_PAUSE", 0.0)
+    await env.make_child(BOT, owner=500)
+    calls = {"send": 0, "edit": 0}
+
+    def send(call):
+        calls["send"] += 1
+        return TelegramNetworkError(method=None, message="HTTP Client says - Request timeout error")  # type: ignore[arg-type]
+
+    def edit(call):
+        calls["edit"] += 1
+        if calls["edit"] == 1:
+            return TelegramNetworkError(method=None, message="HTTP Client says - Request timeout error")  # type: ignore[arg-type]
+
+    env.fake.fail["SendMessage"] = send
+    try:
+        await env.say(BOT, USER, "/start")  # the welcome message may have been delivered → never repeated
+    except TelegramNetworkError:
+        pass  # (the error notice fails the same way; nothing is retried either)
+    assert calls["send"] == 2  # welcome + the error notice, each exactly once
+    env.fake.fail.pop("SendMessage")
+    env.fake.fail["EditMessageText"] = edit
+    await env.tap(BOT, USER, pack("list", 0, "c"))
+    assert calls["edit"] == 2
+
+
+async def test_sessions_use_short_timeout_and_keepalive(env):
+    from aiogram.client.session.aiohttp import AiohttpSession
+
+    env.app.session_factory = lambda: AiohttpSession()
+    bot = env.app.make_bot(f"{BOT}:" + "B" * 35)
+    assert bot.session.timeout == 20
+    assert bot.session._connector_init.get("keepalive_timeout") == 10

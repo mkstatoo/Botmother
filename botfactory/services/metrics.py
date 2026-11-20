@@ -6,6 +6,7 @@ Purpose: tell *where* a slow bot loses its time — in the network path to Teleg
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -15,6 +16,7 @@ from typing import Any
 
 from aiogram import BaseMiddleware, Bot
 from aiogram.client.session.middlewares.base import BaseRequestMiddleware
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.methods import GetUpdates, TelegramMethod
 
 log = logging.getLogger(__name__)
@@ -126,3 +128,35 @@ def system_snapshot() -> dict[str, float | None]:
     except (OSError, ValueError, IndexError):
         pass
     return out
+
+
+# --------------------------------------------------------------------------- network resilience
+RETRIES = 2
+RETRY_PAUSE = 0.3
+# sending a message that timed out may already have been delivered → never repeat those on timeout
+_SENDS = ("Send", "Copy", "Forward")
+
+
+class NetRetry(BaseRequestMiddleware):
+    """Retry a Telegram call whose connection died (typical for stale keep-alive sockets behind a proxy).
+
+    A dead connection is reported at once ("Server disconnected"); retrying on a fresh socket
+    fixes it in a fraction of a second instead of failing the user's click. A *timeout* is only
+    retried for calls that are safe to repeat (edit / answer / lookups), not for sends.
+    """
+
+    async def __call__(self, make_request, bot: Bot, method: TelegramMethod[Any]):
+        name = type(method).__name__
+        if isinstance(method, GetUpdates):  # the polling loop has its own back-off
+            return await make_request(bot, method)
+        attempt = 0
+        while True:
+            try:
+                return await make_request(bot, method)
+            except TelegramNetworkError as exc:
+                timed_out = "timeout" in str(exc).lower()
+                if attempt >= RETRIES or (timed_out and name.startswith(_SENDS)):
+                    raise
+                attempt += 1
+                log.info("retrying %s after network error (%s), attempt %d", name, exc, attempt)
+                await asyncio.sleep(RETRY_PAUSE)
