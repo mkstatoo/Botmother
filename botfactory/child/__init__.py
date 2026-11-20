@@ -9,6 +9,7 @@ from aiogram.types import ErrorEvent
 
 from ..routing import attach
 from . import admin_content, admin_manage, gate, shop_admin, shop_user, user
+from ..services.metrics import UpdateTimer
 from .middleware import ChildContext
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -20,6 +21,7 @@ log = logging.getLogger(__name__)
 def build_child_dispatcher(app: App) -> Dispatcher:
     """One dispatcher serves every generated bot (the tenant is resolved per update)."""
     dp = Dispatcher(storage=app.storage, name="children")
+    dp.update.outer_middleware(UpdateTimer(app.metrics, "child"))
     dp.update.outer_middleware(ChildContext(app))
     # order matters: /start first, then owner routers (media uploads), end-user router last
     attach(dp, gate.router, user.start_router, shop_admin.router, admin_content.router, admin_manage.router, shop_user.router, user.router)

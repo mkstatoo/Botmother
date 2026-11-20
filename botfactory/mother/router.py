@@ -466,7 +466,7 @@ async def _admin_home(app: App):
         [btn("🤖 لیست ربات‌ها", "adml", 0)],
         [btn(f"🧾 رسیدهای در انتظار{review}", "admrv"), btn("💰 پرداخت‌ها", "admpay")],
         [btn("⚙️ تنظیمات اشتراک", "admset"), btn("📢 کانال اصلی", "admmc")],
-        [btn("📣 پیام به سازندگان", "admbc")],
+        [btn("📣 پیام به سازندگان", "admbc"), btn("🩺 سلامت سرویس", "admhl")],
         [btn("🔙 بازگشت", "home")],
     )
 

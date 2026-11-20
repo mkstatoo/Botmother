@@ -31,6 +31,7 @@ from .polling import poll_forever
 from .services.billing import Billing
 from .services.cleanup import cleanup_loop
 from .services.mainchannel import MainChannel
+from .services.metrics import ApiTimer, Metrics
 from .services.payments import PaymentService
 from .services.shop import ShopService
 
@@ -58,6 +59,7 @@ class App:
         self._tasks: list[asyncio.Task] = []
         self._runner: web.AppRunner | None = None
 
+        self.metrics = Metrics()
         self.manager = BotManager(self)
         self.payments = PaymentService(self)
         self.billing = Billing(self)
@@ -79,7 +81,9 @@ class App:
         return MemoryStorage()
 
     def make_bot(self, token: str) -> Bot:
-        return Bot(token, session=self.session_factory(), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        session = self.session_factory()
+        session.middleware(ApiTimer(self.metrics))
+        return Bot(token, session=session, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
     # ------------------------------------------------------------------ helpers
     def spawn(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
